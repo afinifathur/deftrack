@@ -1,0 +1,1 @@
+window.deftrackDebounce=(f,d=275)=>{let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>f(...a),d)}};

@@ -1,0 +1,3 @@
+<?php
+use Illuminate\Database\Migrations\Migration; use Illuminate\Database\Schema\Blueprint; use Illuminate\Support\Facades\Schema;
+return new class extends Migration{ public function up(): void{ Schema::create('batches', function(Blueprint $t){ $t->id(); $t->string('heat_number')->index(); $t->string('item_code')->index(); $t->string('item_name'); $t->decimal('weight_per_pc',10,3)->default(0); $t->unsignedInteger('batch_qty')->default(0); $t->date('cast_date')->nullable(); $t->foreignId('import_session_id')->nullable()->constrained()->nullOnDelete(); $t->timestamps(); $t->unique(['heat_number','item_code']); }); } public function down(): void{ Schema::dropIfExists('batches'); } };

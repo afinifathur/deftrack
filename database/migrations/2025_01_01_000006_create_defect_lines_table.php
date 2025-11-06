@@ -1,0 +1,3 @@
+<?php
+use Illuminate\Database\Migrations\Migration; use Illuminate\Database\Schema\Blueprint; use Illuminate\Support\Facades\Schema;
+return new class extends Migration{ public function up(): void{ Schema::create('defect_lines', function(Blueprint $t){ $t->id(); $t->foreignId('defect_id')->constrained()->cascadeOnDelete(); $t->foreignId('batch_id')->constrained()->cascadeOnDelete(); $t->unsignedBigInteger('defect_type_id'); $t->unsignedBigInteger('subtype_id')->nullable(); $t->unsignedInteger('qty_pcs')->default(0); $t->decimal('qty_kg',10,3)->default(0); $t->timestamps(); $t->index(['batch_id','defect_type_id']); }); } public function down(): void{ Schema::dropIfExists('defect_lines'); } };

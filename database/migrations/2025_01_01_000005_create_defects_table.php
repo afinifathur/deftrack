@@ -1,0 +1,3 @@
+<?php
+use Illuminate\Database\Migrations\Migration; use Illuminate\Database\Schema\Blueprint; use Illuminate\Support\Facades\Schema;
+return new class extends Migration{ public function up(): void{ Schema::create('defects', function(Blueprint $t){ $t->id(); $t->date('date'); $t->foreignId('department_id')->constrained()->cascadeOnDelete(); $t->enum('status',['draft','submitted','approved','rejected'])->default('draft'); $t->unsignedBigInteger('submitted_by')->nullable(); $t->unsignedBigInteger('approved_by')->nullable(); $t->text('rejected_reason')->nullable(); $t->timestamps(); }); } public function down(): void{ Schema::dropIfExists('defects'); } };
