@@ -1,6 +1,8 @@
 <?php
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\{DashboardController,BatchImportController,DefectController,ApprovalController,ReportController,SettingsController};
+use App\Http\Controllers\Api\LookupController;
+
 Route::get('/', [DashboardController::class,'index'])->name('dashboard');
 Route::get('/imports', [BatchImportController::class,'index'])->name('imports.index');
 Route::get('/imports/create', [BatchImportController::class,'create'])->name('imports.create');
@@ -18,3 +20,13 @@ Route::get('/settings', [SettingsController::class,'index'])->name('settings.ind
 Route::post('/settings/departments', [SettingsController::class,'storeDepartment'])->name('settings.departments.store');
 Route::patch('/settings/departments/{department}/toggle', [SettingsController::class,'toggleDepartment'])->name('settings.departments.toggle');
 Route::post('/settings/types', [SettingsController::class,'storeType'])->name('settings.types.store');
+# routes/web.php
+Route::get('/reports/export-xlsx', [ReportController::class,'exportXlsx'])->name('reports.exportXlsx');
+Route::get('/reports/estimate', [ReportController::class,'estimate'])->name('reports.estimate');
+// routes/web.php
+Route::get('/reports/export-pdf', [ReportController::class,'exportPdf'])->name('reports.exportPdf');
+
+Route::prefix('api')->group(function () {
+    Route::get('/heat', [LookupController::class, 'heats'])->name('api.heat');
+    Route::get('/item-info', [LookupController::class, 'itemInfo'])->name('api.itemInfo');
+});

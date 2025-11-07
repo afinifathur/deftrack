@@ -1,1 +1,89 @@
-:root{--primary:#007bff;--accent:#17a2b8;}
+/* public/css/app.css */
+:root {
+    --primary: #007bff;
+    --accent: #17a2b8;
+    --bg: #f6f8fb;
+    --card: #ffffff;
+    --text: #1c1f23;
+    --muted: #6c757d;
+}
+* {
+    box-sizing: border-box;
+}
+html,
+body {
+    color: var(--text);
+}
+.bg-body {
+    background: var(--bg);
+}
+.logo-text {
+    letter-spacing: 0.08em;
+}
+.tracking-1 {
+    letter-spacing: 0.04em;
+}
+.card {
+    border: 0;
+    background: var(--card);
+    border-radius: 16px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+}
+.card .card-title {
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+.table {
+    --bs-table-striped-bg: #f3f7ff;
+}
+.badge-status {
+    text-transform: uppercase;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+}
+.form-label {
+    font-weight: 600;
+}
+.btn {
+    border-radius: 10px;
+}
+.form-control,
+.form-select {
+    border-radius: 10px;
+}
+.navbar .nav-link {
+    color: #eef3ff;
+}
+.navbar .nav-link:hover {
+    color: #fff;
+}
+/* dropdown autocomplete kecil untuk heat */
+.heat-suggest {
+    max-height: 260px;
+    overflow: auto;
+    width: 100%;
+    top: calc(100% + 0.25rem);
+    left: 0;
+}
+.heat-suggest .list-group-item {
+    border: 0;
+    border-bottom: 1px solid #f1f3f7;
+}
+.heat-suggest .list-group-item:last-child {
+    border-bottom: 0;
+}
+/* Fixed-height wrappers for charts */
+.chart-box-280 {
+    height: 280px;
+}
+.chart-box-320 {
+    height: 320px;
+}
+.chart-box-360 {
+    height: 360px;
+}
+
+/* Prevent canvas from stretching parent unexpectedly */
+.card .card-body canvas {
+    display: block;
+}
