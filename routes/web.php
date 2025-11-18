@@ -19,19 +19,16 @@ use App\Http\Middleware\RoleMiddleware;
 
 /*
 |--------------------------------------------------------------------------
-| ROOT: redirect aman (login → dashboard)
+| Root
 |--------------------------------------------------------------------------
 */
-// Akses ke root app
 Route::get('/', function () {
-    return auth()->check()
-        ? redirect()->route('dashboard')
-        : redirect()->route('login');
+    return auth()->check() ? redirect()->route('dashboard') : redirect()->route('login');
 })->name('root');
 
 /*
 |--------------------------------------------------------------------------
-| Auth Routes
+| Auth
 |--------------------------------------------------------------------------
 */
 Route::get('/login',  [AuthController::class, 'showLogin'])->name('login');
@@ -40,73 +37,123 @@ Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
 
 /*
 |--------------------------------------------------------------------------
-| Dashboard
+| Dashboard (public to authenticated users)
 |--------------------------------------------------------------------------
 */
-// Dashboard di /dashboard (boleh diakses publik atau pindahkan ke auth jika perlu)
 Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
 
 /*
 |--------------------------------------------------------------------------
-| Protected (auth)
+| Routes that require authentication
 |--------------------------------------------------------------------------
 */
-
-// ---- Routes yang cukup auth saja (semua role login boleh)
 Route::middleware('auth')->group(function () {
-    // Defects: daftar
-    Route::get('/defects', [DefectController::class, 'index'])->name('defects.index');
-
-    // Reports
-    Route::get('/reports',            [ReportController::class, 'index'])->name('reports.index');
-    Route::get('/reports/estimate',   [ReportController::class, 'estimate'])->name('reports.estimate'); // tetap ada
-    Route::get('/reports/export-csv', [ReportController::class, 'exportCsv'])->name('reports.exportCsv');
-    Route::get('/reports/export-xlsx',[ReportController::class, 'exportXlsx'])->name('reports.exportXlsx');
-    Route::get('/reports/export-pdf', [ReportController::class, 'exportPdf'])->name('reports.exportPdf');
-
-    // API (autocomplete / lookup)
+    /*
+    |--------------------------------------------------------------------------
+    | API: autocomplete / lookup
+    |--------------------------------------------------------------------------
+    */
     Route::prefix('api')->group(function () {
         Route::get('/heat',      [LookupController::class, 'heats'])->name('api.heat');
         Route::get('/item-info', [LookupController::class, 'itemInfo'])->name('api.itemInfo');
     });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Reports (auth)
+    |--------------------------------------------------------------------------
+    */
+    Route::prefix('reports')->name('reports.')->group(function () {
+        Route::get('/',            [ReportController::class, 'index'])->name('index');
+        Route::get('/estimate',   [ReportController::class, 'estimate'])->name('estimate');
+        Route::get('/export-csv', [ReportController::class, 'exportCsv'])->name('exportCsv');
+        Route::get('/export-xlsx',[ReportController::class, 'exportXlsx'])->name('exportXlsx');
+        Route::get('/export-pdf', [ReportController::class, 'exportPdf'])->name('exportPdf');
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Imports (CSV) - Auth only (for local/testing). In production consider role lock.
+    |--------------------------------------------------------------------------
+    */
+    Route::prefix('imports')->name('imports.')->group(function () {
+        Route::get('/',               [BatchImportController::class, 'index'])->name('index');
+        Route::get('/create',         [BatchImportController::class, 'create'])->name('create');
+        Route::post('/',              [BatchImportController::class, 'store'])->name('store');
+        Route::get('/{importSession}',[BatchImportController::class, 'show'])->name('show');
+        Route::get('/{importSession}/edit', [BatchImportController::class, 'edit'])->name('edit');
+        Route::put('/{importSession}',[BatchImportController::class, 'update'])->name('update');
+        Route::delete('/{importSession}',[BatchImportController::class, 'destroy'])->name('destroy');
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Defects (route order matters)
+    |--------------------------------------------------------------------------
+    |
+    | Note:
+    | - Static routes (create, recycle, etc.) MUST be declared before the dynamic
+    |   parameter route '/defects/{defect}' to avoid 'create' or 'recycle' being
+    |   interpreted as {defect}.
+    | - We also add ->whereNumber('defect') on dynamic routes as extra protection.
+    */
+
+    // list (auth users) and create/store (restricted)
+    Route::get('/defects', [DefectController::class, 'index'])->name('defects.index');
+
+    // create/store: Admin QC & Kabag QC only
+    Route::middleware([RoleMiddleware::class . ':admin_qc,kabag_qc'])->group(function () {
+        Route::get('/defects/create', [DefectController::class, 'create'])->name('defects.create');
+        Route::post('/defects', [DefectController::class, 'store'])->name('defects.store');
+    });
+
+    // Recycle & restore (static routes) — declare before {defect}
+    Route::middleware([RoleMiddleware::class . ':kabag_qc,direktur,mr'])->group(function () {
+        Route::get('/defects/recycle', [DefectController::class, 'recycle'])->name('defects.recycle');
+        Route::post('/defects/{id}/restore', [DefectController::class, 'restore'])->name('defects.restore')->whereNumber('id');
+    });
+
+    // Public to authenticated users: show (BUT restrict dynamic param to numbers)
+    Route::get('/defects/{defect}', [DefectController::class, 'show'])
+        ->name('defects.show')
+        ->whereNumber('defect');
+
+    // Single-item actions (edit/update/destroy) — auth required; controller enforces finer-grained rules
+    Route::middleware('auth')->group(function () {
+        Route::get('/defects/{defect}/edit', [DefectController::class, 'edit'])->name('defects.edit')->whereNumber('defect');
+        Route::put('/defects/{defect}', [DefectController::class, 'update'])->name('defects.update')->whereNumber('defect');
+        Route::delete('/defects/{defect}', [DefectController::class, 'destroy'])->name('defects.destroy')->whereNumber('defect');
+    });
+
+    // submit / approvals: Kabag QC only (static / parameter routes placed with constraints)
+    Route::middleware([RoleMiddleware::class . ':kabag_qc'])->group(function () {
+        Route::post('/defects/{defect}/submit', [DefectController::class, 'submit'])->name('defects.submit')->whereNumber('defect');
+        Route::post('/approvals/{defect}/approve', [ApprovalController::class, 'approve'])->name('approvals.approve')->whereNumber('defect');
+        Route::post('/approvals/{defect}/reject', [ApprovalController::class, 'reject'])->name('approvals.reject')->whereNumber('defect');
+    });
 });
 
-// ---- Imports & Settings: hanya Kabag QC + Direktur
-Route::middleware([
-    'auth',
-    RoleMiddleware::class . ':kabag_qc,direktur',
-])->group(function () {
-    // Imports
-    Route::get('/imports',               [BatchImportController::class, 'index'])->name('imports.index');
-    Route::get('/imports/create',        [BatchImportController::class, 'create'])->name('imports.create');
-    Route::post('/imports',              [BatchImportController::class, 'store'])->name('imports.store');
-    Route::delete('/imports/{importSession}', [BatchImportController::class, 'destroy'])->name('imports.destroy');
+ /*
+ |--------------------------------------------------------------------------
+ | Settings & Management (role-protected)
+ |--------------------------------------------------------------------------
+ */
+Route::middleware(['auth', RoleMiddleware::class . ':kabag_qc,direktur,mr,admin'])->group(function () {
+    Route::get('/settings', [SettingsController::class, 'index'])->name('settings.index');
 
-    // Settings
-    Route::get('/settings',                         [SettingsController::class, 'index'])->name('settings.index');
-    Route::post('/settings/departments',            [SettingsController::class, 'storeDepartment'])->name('settings.departments.store');
+    // Departments
+    Route::post('/settings/departments', [SettingsController::class, 'storeDepartment'])->name('settings.departments.store');
     Route::patch('/settings/departments/{department}/toggle', [SettingsController::class, 'toggleDepartment'])->name('settings.departments.toggle');
-    Route::post('/settings/types',                  [SettingsController::class, 'storeType'])->name('settings.types.store');
+
+    // Types
+    Route::post('/settings/types', [SettingsController::class, 'storeType'])->name('settings.types.store');
 });
 
-// ---- Defects input: Admin QC & Kabag QC
-Route::middleware([
-    'auth',
-    RoleMiddleware::class . ':admin_qc,kabag_qc',
-])->group(function () {
-    Route::get('/defects/create', [DefectController::class, 'create'])->name('defects.create');
-    Route::post('/defects',       [DefectController::class, 'store'])->name('defects.store');
-});
-
-// ---- Submit/Approve/Reject: Kabag QC
-Route::middleware([
-    'auth',
-    RoleMiddleware::class . ':kabag_qc',
-])->group(function () {
-    Route::post('/defects/{defect}/submit',   [DefectController::class, 'submit'])->name('defects.submit');
-    Route::post('/approvals/{defect}/approve',[ApprovalController::class, 'approve'])->name('approvals.approve');
-    Route::post('/approvals/{defect}/reject', [ApprovalController::class, 'reject'])->name('approvals.reject');
-});
+/*
+|--------------------------------------------------------------------------
+| Fallback
+|--------------------------------------------------------------------------
+*/
 Route::fallback(function () {
     return redirect()->route('login');
 });
