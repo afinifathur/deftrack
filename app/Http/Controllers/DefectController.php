@@ -7,17 +7,15 @@ use App\Models\Defect;
 use App\Models\DefectLine;
 use App\Models\Department;
 use App\Models\DefectType;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
 
 class DefectController extends Controller
 {
-    /**
-     * Minimal role authorizer (wraps inline checks).
-     * Replace with Policies/Gates for production.
-     */
-    protected function authorizeRole(array $allowedRoles)
+    protected function authorizeRole(array $allowedRoles): void
     {
         $user = auth()->user();
         if (!$user || !in_array($user->role, $allowedRoles, true)) {
@@ -25,12 +23,6 @@ class DefectController extends Controller
         }
     }
 
-    /**
-     * Index: list defects with optional search + filter.
-     * Query params:
-     *  - q: search heat_number, batch_code, item_code, item_name (via lines->batch)
-     *  - department_id
-     */
     public function index(Request $request)
     {
         $q = (string) $request->query('q', '');
@@ -55,18 +47,12 @@ class DefectController extends Controller
         return view('defects.index', compact('defects', 'departments'));
     }
 
-    /**
-     * Show single defect (with lines).
-     */
     public function show(Defect $defect)
     {
         $defect->load(['department', 'lines.batch', 'lines.defectType']);
         return view('defects.show', compact('defect'));
     }
 
-    /**
-     * Create form.
-     */
     public function create()
     {
         $departments = Department::where('is_active', 1)->orderBy('name')->get();
@@ -88,57 +74,159 @@ class DefectController extends Controller
 
     /**
      * Store defect + lines as draft.
+     *
+     * Accepts:
+     * - structured: lines => [ ['heat_number'=>..., 'item_code'=>..., ...], ... ]
+     * - or parallel arrays: heat_number[], item_code[], defect_type_id[], subtype_id[], qty_pcs[], qty_kg[], batch_code[]
      */
     public function store(Request $request)
     {
-        // only admin_qc or kabag_qc can create (per your routes this group already protected)
         $this->authorizeRole(['admin_qc', 'kabag_qc']);
 
-        $request->validate([
-            'date'                     => ['required', 'date'],
-            'department_id'            => ['required', 'exists:departments,id'],
-            'lines'                    => ['required', 'array', 'min:1'],
-            'lines.*.heat_number'      => ['required', 'string'],
-            'lines.*.item_code'        => ['required', 'string'],
-            'lines.*.defect_type_id'   => ['required', 'exists:defect_types,id'],
-            'lines.*.qty_pcs'          => ['nullable', 'numeric', 'min:0'],
-            'lines.*.qty_kg'           => ['nullable', 'numeric', 'min:0'],
-            'lines.*.subtype_id'       => ['nullable', 'exists:defect_types,id'],
+        $data = $request->validate([
+            'date'          => ['required', 'date'],
+            'department_id' => ['required', 'exists:departments,id'],
+            'notes'         => ['nullable', 'string'],
+            'status'        => ['nullable', 'string'], // optional: draft/submitted
         ]);
 
-        DB::transaction(function () use ($request) {
-            $defect = Defect::create([
-                'date'          => $request->date,
-                'department_id' => $request->department_id,
-                'status'        => 'draft',
-                'submitted_by'  => auth()->id() ?? 1,
-            ]);
+        // Build unified $lines array from either 'lines' structured input or parallel arrays
+        $lines = [];
 
-            foreach ($request->lines as $line) {
-                $batch = Batch::where('heat_number', $line['heat_number'])
-                    ->where('item_code', $line['item_code'])
-                    ->first();
+        if ($request->has('lines') && is_array($request->input('lines'))) {
+            // structured input: lines[*][field]
+            foreach ($request->input('lines') as $raw) {
+                if (!is_array($raw)) continue;
+                $heat = trim($raw['heat_number'] ?? '');
+                $item = trim($raw['item_code'] ?? '');
+                $pcs  = isset($raw['qty_pcs']) ? (int)$raw['qty_pcs'] : 0;
+                $type = $raw['defect_type_id'] ?? null;
 
-                if (!$batch) {
-                    // skip if no matching batch
+                // skip empty rows (same criteria as frontend)
+                if ($heat === '' && $item === '' && $pcs <= 0 && empty($type)) {
                     continue;
                 }
 
-                $current  = DefectLine::where('batch_id', $batch->id)->sum('qty_pcs');
-                $incoming = (int) ($line['qty_pcs'] ?? 0);
+                $lines[] = [
+                    'heat_number'     => $heat !== '' ? $heat : null,
+                    'item_code'       => $item !== '' ? $item : null,
+                    'defect_type_id'  => $type ?: null,
+                    'subtype_id'      => $raw['subtype_id'] ?? null,
+                    'qty_pcs'         => $pcs,
+                    'qty_kg'          => isset($raw['qty_kg']) ? (float)$raw['qty_kg'] : 0.0,
+                    'batch_code'      => $raw['batch_code'] ?? null,
+                ];
+            }
+        } else {
+            // parallel arrays input (heat_number[], item_code[], ...)
+            $heats      = $request->input('heat_number', []);
+            $items      = $request->input('item_code', []);
+            $types      = $request->input('defect_type_id', []);
+            $subtypes   = $request->input('subtype_id', []);
+            $qtyPcs     = $request->input('qty_pcs', []);
+            $qtyKg      = $request->input('qty_kg', []);
+            $batchCodes = $request->input('batch_code', []);
 
-                if ($current + $incoming > $batch->batch_qty) {
-                    abort(422, 'Total defect qty melebihi batch_qty untuk heat '
-                        . $batch->heat_number . ' / ' . $batch->item_code);
+            $count = max(
+                count($heats), count($items), count($types),
+                count($subtypes), count($qtyPcs), count($qtyKg), count($batchCodes)
+            );
+
+            for ($i = 0; $i < $count; $i++) {
+                $heat = trim($heats[$i] ?? '');
+                $item = trim($items[$i] ?? '');
+                $pcs  = isset($qtyPcs[$i]) ? (int)$qtyPcs[$i] : 0;
+                $type = $types[$i] ?? null;
+
+                if ($heat === '' && $item === '' && $pcs <= 0 && empty($type)) {
+                    continue;
                 }
 
+                $lines[] = [
+                    'heat_number'     => $heat !== '' ? $heat : null,
+                    'item_code'       => $item !== '' ? $item : null,
+                    'defect_type_id'  => $type ?: null,
+                    'subtype_id'      => $subtypes[$i] ?? null,
+                    'qty_pcs'         => $pcs,
+                    'qty_kg'          => isset($qtyKg[$i]) ? (float)$qtyKg[$i] : 0.0,
+                    'batch_code'      => $batchCodes[$i] ?? null,
+                ];
+            }
+        }
+
+        if (empty($lines)) {
+            // Allow empty lines but warn — we still create parent if user wants (mirrors frontend confirmation)
+            Log::info('Saving defect with no lines', ['user_id' => auth()->id(), 'department_id' => $data['department_id'] ?? null]);
+        }
+
+        DB::transaction(function () use ($data, $lines) {
+            $defect = Defect::create([
+                'date'          => $data['date'],
+                'department_id' => $data['department_id'],
+                'notes'         => $data['notes'] ?? null,
+                'status'        => $data['status'] ?? 'draft',
+                'submitted_by'  => auth()->id() ?? 1,
+            ]);
+
+            foreach ($lines as $idx => $ln) {
+                // Basic per-line validation: must have heat OR item OR defect_type
+                if (empty($ln['heat_number']) && empty($ln['item_code']) && empty($ln['defect_type_id'])) {
+                    continue;
+                }
+
+                $batch = null;
+
+                if (!empty($ln['heat_number']) && !empty($ln['item_code'])) {
+                    $batch = Batch::where('heat_number', $ln['heat_number'])
+                        ->where('item_code', $ln['item_code'])
+                        ->first();
+                } elseif (!empty($ln['heat_number'])) {
+                    // try find by heat only
+                    $batch = Batch::where('heat_number', $ln['heat_number'])->latest('cast_date')->first();
+                }
+
+                if (!$batch) {
+                    // create lightweight Batch record (ad-hoc) so defect lines can reference a batch
+                    $batchCode = $ln['batch_code'] ?? Batch::generateBatchCode($data['date'] ?? Carbon::now()->toDateString());
+                    $batch = Batch::create([
+                        'heat_number'       => $ln['heat_number'] ?? null,
+                        'item_code'         => $ln['item_code'] ?? null,
+                        'item_name'         => null,
+                        'weight_per_pc'     => null,
+                        'batch_qty'         => 0,
+                        'cast_date'         => $data['date'] ?? Carbon::now()->toDateString(),
+                        'import_session_id' => null,
+                        'batch_code'        => $batchCode,
+                    ]);
+
+                    Log::info('Created ad-hoc batch for defect (store)', [
+                        'batch_id' => $batch->id,
+                        'heat' => $ln['heat_number'] ?? null,
+                        'item' => $ln['item_code'] ?? null,
+                        'source' => 'defect.store'
+                    ]);
+                }
+
+                // check qty constraint only if batch.batch_qty > 0 (if 0 it's ad-hoc; skip check)
+                $incoming = isset($ln['qty_pcs']) ? (int)$ln['qty_pcs'] : 0;
+                if ($batch->batch_qty > 0) {
+                    $currentSum = (int) DefectLine::where('batch_id', $batch->id)->sum('qty_pcs');
+                    if ($currentSum + $incoming > $batch->batch_qty) {
+                        // throw validation style exception
+                        throw ValidationException::withMessages([
+                            "lines.{$idx}.qty_pcs" => ["Total defect qty exceeds batch_qty for heat {$batch->heat_number} / {$batch->item_code}"]
+                        ]);
+                    }
+                }
+
+                // create defect line (link to batch)
                 DefectLine::create([
                     'defect_id'      => $defect->id,
                     'batch_id'       => $batch->id,
-                    'defect_type_id' => $line['defect_type_id'],
-                    'subtype_id'     => $line['subtype_id'] ?? null,
+                    'defect_type_id' => $ln['defect_type_id'],
+                    'subtype_id'     => $ln['subtype_id'] ?? null,
                     'qty_pcs'        => $incoming,
-                    'qty_kg'         => $line['qty_kg'] ?? 0,
+                    'qty_kg'         => $ln['qty_kg'] ?? 0.0,
                 ]);
             }
         });
@@ -146,26 +234,25 @@ class DefectController extends Controller
         return redirect()->route('defects.index')->with('status', 'Defect disimpan sebagai draft.');
     }
 
-    /**
-     * Submit defect => set status submitted.
-     */
     public function submit(Defect $defect)
     {
-        // allow submit only for admin_qc in same dept OR kabag_qc
-        $userRole = auth()->user()?->role;
-        if ($userRole === 'admin_qc' && auth()->user()->department_id !== $defect->department_id) {
+        $user = auth()->user();
+        $userRole = $user?->role;
+
+        if ($userRole === 'admin_qc' && $user->department_id !== $defect->department_id) {
             abort(403);
         }
+
         $this->authorizeRole(['admin_qc', 'kabag_qc']);
 
-        $defect->update(['status' => 'submitted', 'submitted_by' => auth()->id() ?? $defect->submitted_by]);
+        $defect->update([
+            'status' => 'submitted',
+            'submitted_by' => auth()->id() ?? $defect->submitted_by,
+        ]);
 
         return back()->with('status', 'Defect submitted ke Kabag QC.');
     }
 
-    /**
-     * Soft delete (move to recycle).
-     */
     public function destroy(Defect $defect)
     {
         $this->authorizeRole(['kabag_qc', 'direktur', 'mr']);
@@ -175,9 +262,6 @@ class DefectController extends Controller
         return back()->with('success', 'Defect berhasil dipindah ke recycle.');
     }
 
-    /**
-     * Recycle: list soft-deleted defects (only for certain roles).
-     */
     public function recycle()
     {
         $this->authorizeRole(['kabag_qc', 'direktur', 'mr']);
@@ -187,9 +271,6 @@ class DefectController extends Controller
         return view('defects.recycle', compact('deleted'));
     }
 
-    /**
-     * Restore a soft-deleted defect (by id).
-     */
     public function restore($id)
     {
         $this->authorizeRole(['kabag_qc', 'direktur', 'mr']);
@@ -200,18 +281,15 @@ class DefectController extends Controller
         return back()->with('success', 'Defect restored.');
     }
 
-    /**
-     * Edit form.
-     */
     public function edit(Defect $defect)
     {
         $user = auth()->user();
         $userRole = $user?->role;
 
-        // permissions
         if (!in_array($userRole, ['admin_qc', 'kabag_qc', 'direktur', 'mr'], true)) {
             abort(403);
         }
+
         if ($userRole === 'admin_qc' && $user->department_id && $user->department_id !== $defect->department_id) {
             abort(403);
         }
@@ -223,10 +301,6 @@ class DefectController extends Controller
         return view('defects.edit', compact('defect', 'types', 'departments'));
     }
 
-    /**
-     * Update parent + child lines.
-     * Strategy: validate, then transactionally update/create/delete child lines.
-     */
     public function update(Request $request, Defect $defect)
     {
         $user = auth()->user();
@@ -235,11 +309,12 @@ class DefectController extends Controller
         if (!in_array($userRole, ['admin_qc', 'kabag_qc', 'direktur', 'mr'], true)) {
             abort(403);
         }
+
         if ($userRole === 'admin_qc' && $user->department_id && $user->department_id !== $defect->department_id) {
             abort(403);
         }
 
-        $request->validate([
+        $validated = $request->validate([
             'date'                     => ['required', 'date'],
             'department_id'            => ['required', 'exists:departments,id'],
             'notes'                    => ['nullable', 'string'],
@@ -253,29 +328,32 @@ class DefectController extends Controller
             'lines.*.subtype_id'       => ['nullable', 'exists:defect_types,id'],
         ]);
 
-        DB::transaction(function () use ($request, $defect) {
-            $defect->update($request->only(['date', 'department_id', 'notes']));
+        DB::transaction(function () use ($validated, $defect) {
+            $defect->update($validated + ['notes' => $validated['notes'] ?? $defect->notes]);
 
             $existingLines = $defect->lines()->get()->keyBy('id');
             $seenIds = [];
 
-            foreach ($request->lines as $line) {
-                // update existing line
+            foreach ($validated['lines'] as $line) {
                 if (!empty($line['id'])) {
-                    $seenIds[] = (int) $line['id'];
-                    $dl = DefectLine::find($line['id']);
+                    $lineId = (int) $line['id'];
+                    $seenIds[] = $lineId;
+
+                    $dl = DefectLine::find($lineId);
                     if (!$dl) continue;
 
                     $incoming = isset($line['qty_pcs']) ? (int) $line['qty_pcs'] : $dl->qty_pcs;
+
                     $batch = $dl->batch()->first();
                     if ($batch) {
-                        $other_sum = DefectLine::where('batch_id', $batch->id)
+                        $other_sum = (int) DefectLine::where('batch_id', $batch->id)
                             ->where('id', '!=', $dl->id)
                             ->sum('qty_pcs');
 
                         if ($other_sum + $incoming > $batch->batch_qty) {
-                            abort(422, 'Total defect qty melebihi batch_qty untuk heat '
-                                . $batch->heat_number . ' / ' . $batch->item_code);
+                            throw ValidationException::withMessages([
+                                'lines' => ["Total defect qty exceeds batch_qty for heat {$batch->heat_number} / {$batch->item_code}"]
+                            ]);
                         }
                     }
 
@@ -286,22 +364,28 @@ class DefectController extends Controller
                         'qty_kg'         => $line['qty_kg'] ?? $dl->qty_kg,
                     ]);
                 } else {
-                    // create new line (must find batch)
-                    $batch = Batch::where('heat_number', $line['heat_number'])
-                        ->where('item_code', $line['item_code'])
-                        ->first();
-
-                    if (!$batch) {
-                        // skip if batch not found
+                    $heat = $line['heat_number'] ?? null;
+                    $item = $line['item_code'] ?? null;
+                    if (!$heat || !$item) {
                         continue;
                     }
 
-                    $incoming = (int) ($line['qty_pcs'] ?? 0);
-                    $currentSum = DefectLine::where('batch_id', $batch->id)->sum('qty_pcs');
+                    $batch = Batch::where('heat_number', $heat)
+                        ->where('item_code', $item)
+                        ->first();
+
+                    if (!$batch) {
+                        Log::warning('Batch not found when creating defect line (update)', ['heat' => $heat, 'item' => $item]);
+                        continue;
+                    }
+
+                    $incoming = isset($line['qty_pcs']) ? (int) $line['qty_pcs'] : 0;
+                    $currentSum = (int) DefectLine::where('batch_id', $batch->id)->sum('qty_pcs');
 
                     if ($currentSum + $incoming > $batch->batch_qty) {
-                        abort(422, 'Total defect qty melebihi batch_qty untuk heat '
-                            . $batch->heat_number . ' / ' . $batch->item_code);
+                        throw ValidationException::withMessages([
+                            'lines' => ["Total defect qty exceeds batch_qty for heat {$batch->heat_number} / {$batch->item_code}"]
+                        ]);
                     }
 
                     $new = DefectLine::create([
@@ -317,7 +401,6 @@ class DefectController extends Controller
                 }
             }
 
-            // delete lines that were removed in request
             $toDelete = $existingLines->keys()->diff($seenIds);
             if ($toDelete->isNotEmpty()) {
                 DefectLine::whereIn('id', $toDelete->all())->delete();
