@@ -37,6 +37,7 @@
         @for ($i = 0; $i < 5; $i++)
         <div class="line-row p-3 rounded-3 border bg-white position-relative" data-wired="0">
           <div class="row g-3 align-items-end row-header">
+
             <div class="col-md-2 position-relative">
               <label class="form-label">Heat No.</label>
               <input
@@ -51,10 +52,45 @@
 
             <div class="col-md-2">
               <label class="form-label">Item Code</label>
-              <input type="text" class="form-control item-code" name="lines[{{ $i }}][item_code]" placeholder="cth: FLG-2IN-150">
+              <input type="text" class="form-control item-code" name="lines[{{ $i }}][item_code]" readonly>
             </div>
 
             <div class="col-md-3">
+              <label class="form-label">Item Name</label>
+              <input type="text" class="form-control item-name" name="lines[{{ $i }}][item_name]" readonly>
+            </div>
+
+            <div class="col-md-1">
+              <label class="form-label">AISI</label>
+              <input type="text" class="form-control aisi" name="lines[{{ $i }}][aisi]" readonly>
+            </div>
+
+            <div class="col-md-1">
+              <label class="form-label">Size</label>
+              <input type="text" class="form-control size" name="lines[{{ $i }}][size]" readonly>
+            </div>
+
+            <div class="col-md-2">
+              <label class="form-label">Line</label>
+              <input type="text" class="form-control line" name="lines[{{ $i }}][line]" readonly>
+            </div>
+
+            <div class="col-md-2">
+              <label class="form-label">Cust</label>
+              <input type="text" class="form-control cust_name" name="lines[{{ $i }}][cust_name]" readonly>
+            </div>
+
+            <div class="col-md-1">
+              <label class="form-label">Qty PCS</label>
+              <input class="form-control" type="number" min="0" name="lines[{{ $i }}][qty_pcs]" placeholder="0" value="{{ old("lines.$i.qty_pcs", '') }}">
+            </div>
+
+            <div class="col-md-1">
+              <label class="form-label">Qty KG</label>
+              <input class="form-control" type="number" min="0" step="0.001" name="lines[{{ $i }}][qty_kg]" placeholder="0.000" value="{{ old("lines.$i.qty_kg", '') }}">
+            </div>
+
+            <div class="col-md-3 mt-2">
               <label class="form-label">Kategori</label>
               <select class="form-select category" name="lines[{{ $i }}][defect_type_id]">
                 <option value="">— Pilih Kategori —</option>
@@ -64,22 +100,6 @@
               </select>
             </div>
 
-            <div class="col-md-3">
-              <label class="form-label">Subkategori</label>
-              <select class="form-select subcategory" name="lines[{{ $i }}][subtype_id]">
-                <option value="">— Pilih Subkategori —</option>
-              </select>
-            </div>
-
-            <div class="col-md-1">
-              <label class="form-label">Qty PCS</label>
-              <input class="form-control" type="number" min="0" name="lines[{{ $i }}][qty_pcs]" placeholder="0">
-            </div>
-
-            <div class="col-md-1">
-              <label class="form-label">Qty KG</label>
-              <input class="form-control" type="number" min="0" step="0.001" name="lines[{{ $i }}][qty_kg]" placeholder="0.000">
-            </div>
           </div>
 
           {{-- hidden batch_code per line (filled by JS or server) --}}
@@ -124,6 +144,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // ---------- Endpoints ----------
   const heatUrl = "{{ route('api.heat') }}";               // ?prefix=...
   const nextCodeUrl = "{{ route('api.nextBatchCode') }}";  // ?departemen=...&date=...
+  const itemInfoUrl = "{{ route('api.itemInfo') }}";       // ?heat=...
 
   // cache for next batch code by deptName::date
   const nextCodeCache = {};
@@ -163,6 +184,24 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
+  async function fetchItemInfoByHeat(heat) {
+    if (!heat) return null;
+    try {
+      const url = new URL(itemInfoUrl, window.location.origin);
+      url.searchParams.set('heat', heat);
+      const res = await fetch(url.toString(), { headers: { 'Accept': 'application/json' } });
+      if (!res.ok) return null;
+      const j = await res.json();
+      // prefer {status: 'ok', data: {...}}, but accept older shapes
+      if (j && j.status === 'ok') return j.data;
+      if (j && j.data) return j.data;
+      return j;
+    } catch (e) {
+      console.error('fetchItemInfoByHeat', e);
+    }
+    return null;
+  }
+
   // ---------- Suggestion UI helpers ----------
   function ensureSuggestBox(rowEl) {
     let box = rowEl.querySelector('.heat-suggest');
@@ -194,7 +233,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     let html = '<div class="list-group list-group-flush">';
     items.forEach(it => {
-      // expected fields: heat_number, item_code, item_name, maybe batch_code
+      // expected fields from heat API: heat_number, item_code, item_name, maybe batch_code
       html += `<button type="button" class="list-group-item list-group-item-action py-2 small"
                         data-heat="${escapeHtml(it.heat_number)}"
                         data-item="${escapeHtml(it.item_code)}"
@@ -228,42 +267,85 @@ document.addEventListener('DOMContentLoaded', function () {
 
     const heatInput = rowEl.querySelector('.heat');
     const itemInput = rowEl.querySelector('.item-code');
+    const itemNameInput = rowEl.querySelector('.item-name');
+    const aisiInput = rowEl.querySelector('.aisi');
+    const sizeInput = rowEl.querySelector('.size');
+    const lineInput = rowEl.querySelector('.line');
+    const custInput = rowEl.querySelector('.cust_name');
     const cat = rowEl.querySelector('.category');
-    const sub = rowEl.querySelector('.subcategory');
     const suggestBox = ensureSuggestBox(rowEl);
 
-    // category -> subcategory
-    if (cat && sub) {
+    // category -> (no subcategory in new UI) still keep children mapping if you want to populate something later
+    if (cat) {
       cat.addEventListener('change', function () {
-        const children = safeChildren(this.value);
-        sub.innerHTML = '<option value="">— Pilih Subkategori —</option>';
-        children.forEach(c => {
-          const opt = document.createElement('option');
-          opt.value = c.id; opt.textContent = c.name;
-          sub.appendChild(opt);
-        });
+        // placeholder for future behavior on category change
       }, { passive: true });
     }
 
-    // heat autocomplete
+    // heat autocomplete + selection behavior: fills item fields and batch_code (via item-info)
     if (heatInput) {
       const doFetch = debounce(async function () {
         const q = heatInput.value.trim();
         if (q.length < 1) { renderSuggestions(suggestBox, [], ()=>{}); return; }
         const items = await fetchHeatSuggestions(q);
-        renderSuggestions(suggestBox, items, function (heat, item, batch) {
+        renderSuggestions(suggestBox, items, async function (heat, item, batch) {
           heatInput.value = heat;
-          if (itemInput) itemInput.value = item;
+          if (itemInput) itemInput.value = item || '';
+          // if suggestion had a batch code, tentatively set it; otherwise item-info fetch will set
           if (batch) {
             heatInput.dataset.batchCode = batch;
             setLineBatchCode(rowEl, batch);
           }
           renderSuggestions(suggestBox, [], ()=>{});
+
+          // fetch full item info by heat and populate read-only fields + batch_code
+          const info = await fetchItemInfoByHeat(heat);
+          if (info) {
+            if (itemInput && info.item_code) itemInput.value = info.item_code;
+            if (itemNameInput && info.item_name) itemNameInput.value = info.item_name;
+            if (aisiInput && info.aisi) aisiInput.value = info.aisi;
+            if (sizeInput && info.size) sizeInput.value = info.size;
+            if (lineInput && info.line) lineInput.value = info.line;
+            if (custInput && info.cust_name) custInput.value = info.cust_name;
+            if (info.batch_code) {
+              heatInput.dataset.batchCode = info.batch_code;
+              setLineBatchCode(rowEl, info.batch_code);
+            }
+          }
         });
       }, 300);
 
       heatInput.addEventListener('input', doFetch);
       heatInput.addEventListener('focus', doFetch);
+
+      // also, when the heat input loses focus or is changed manually, try to fetch item-info
+      heatInput.addEventListener('change', debounce(async function () {
+        const h = heatInput.value.trim();
+        if (!h) {
+          // clear dependent fields
+          if (itemInput) itemInput.value = '';
+          if (itemNameInput) itemNameInput.value = '';
+          if (aisiInput) aisiInput.value = '';
+          if (sizeInput) sizeInput.value = '';
+          if (lineInput) lineInput.value = '';
+          if (custInput) custInput.value = '';
+          setLineBatchCode(rowEl, '');
+          return;
+        }
+        const info = await fetchItemInfoByHeat(h);
+        if (info) {
+          if (itemInput && info.item_code) itemInput.value = info.item_code;
+          if (itemNameInput && info.item_name) itemNameInput.value = info.item_name;
+          if (aisiInput && info.aisi) aisiInput.value = info.aisi;
+          if (sizeInput && info.size) sizeInput.value = info.size;
+          if (lineInput && info.line) lineInput.value = info.line;
+          if (custInput && info.cust_name) custInput.value = info.cust_name;
+          if (info.batch_code) {
+            heatInput.dataset.batchCode = info.batch_code;
+            setLineBatchCode(rowEl, info.batch_code);
+          }
+        }
+      }, 250));
 
       document.addEventListener('click', function (ev) {
         if (suggestBox && !suggestBox.contains(ev.target) && ev.target !== heatInput) {
@@ -321,7 +403,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
       if (el.tagName === 'SELECT') {
         el.selectedIndex = 0;
-        if (el.classList.contains('subcategory')) el.innerHTML = '<option value="">— Pilih Subkategori —</option>';
       } else if (el.type === 'hidden') {
         if (el.name && el.name.includes('[batch_code]')) el.value = '';
       } else {
@@ -369,14 +450,6 @@ document.addEventListener('DOMContentLoaded', function () {
     const code = await fetchNextBatchCode(dept, date);
     if (code) setLineBatchCode(rowEl, code);
   }
-
-  // public callback if suggestion returns batch metadata
-  window.__deftrack_fillBatchCodeFromHeatSelection = function (heatInputEl, batch) {
-    if (!heatInputEl || !batch) return;
-    heatInputEl.dataset.batchCode = batch.batch_code || '';
-    const row = heatInputEl.closest('.line-row');
-    if (row) setLineBatchCode(row, batch.batch_code || '');
-  };
 
   // ---------- Helpers for submit ----------
   function isRowFilled(row) {
@@ -451,6 +524,14 @@ document.addEventListener('DOMContentLoaded', function () {
   if (depEl) depEl.addEventListener('change', debounce(updateBatchPreview, 300));
   if (dateEl) dateEl.addEventListener('change', debounce(updateBatchPreview, 300));
   updateBatchPreview();
+
+  // Expose a helper if other scripts/plugin want to set batch code by heat selection
+  window.__deftrack_fillBatchCodeFromHeatSelection = function (heatInputEl, batchObj) {
+    if (!heatInputEl || !batchObj) return;
+    heatInputEl.dataset.batchCode = batchObj.batch_code || '';
+    const row = heatInputEl.closest('.line-row');
+    if (row) setLineBatchCode(row, batchObj.batch_code || '');
+  };
 
 });
 </script>

@@ -40,34 +40,77 @@ class LookupController extends Controller
     }
 
     /**
-     * GET /api/item-info?heat=H240901&item=FLG-2IN-150
-     * Return a single batch matching heat + item for auto-fill.
+     * GET /api/item-info?heat=H240901
+     * Return a single batch matching heat for auto-fill, with additional fields.
+     *
+     * Request: ?heat=...
+     *
+     * Response:
+     * {
+     *   "status": "ok",
+     *   "data": {
+     *     "heat_number": "...",
+     *     "item_code": "...",
+     *     "item_name": "...",
+     *     "weight_per_pc": ...,
+     *     "batch_qty": ...,
+     *     "batch_code": "...",
+     *     "aisi": "...",
+     *     "size": "...",
+     *     "line": "...",
+     *     "cust_name": "..."
+     *   }
+     * }
      */
     public function itemInfo(Request $request)
     {
         $heat = (string) $request->query('heat', '');
-        $item = (string) $request->query('item', '');
 
-        if ($heat === '' || $item === '') {
+        if (trim($heat) === '') {
             return response()->json([
-                'data' => null,
-                'message' => 'Both heat and item are required.'
+                'status' => 'error',
+                'message' => 'heat required'
             ], 422);
         }
 
+        // Select only the columns we need
         $batch = Batch::query()
             ->where('heat_number', $heat)
-            ->where('item_code', $item)
             ->first([
                 'heat_number',
                 'item_code',
                 'item_name',
                 'weight_per_pc',
                 'batch_qty',
-                'cast_date',
+                'batch_code',
+                'aisi',
+                'size',
+                'line',
+                'cust_name',
             ]);
 
-        return response()->json(['data' => $batch], 200);
+        if (!$batch) {
+            return response()->json([
+                'status' => 'ok',
+                'data' => null
+            ], 200);
+        }
+
+        return response()->json([
+            'status' => 'ok',
+            'data' => [
+                'heat_number'   => $batch->heat_number,
+                'item_code'     => $batch->item_code,
+                'item_name'     => $batch->item_name,
+                'weight_per_pc' => $batch->weight_per_pc,
+                'batch_qty'     => $batch->batch_qty,
+                'batch_code'    => $batch->batch_code,
+                'aisi'          => $batch->aisi,
+                'size'          => $batch->size,
+                'line'          => $batch->line,
+                'cust_name'     => $batch->cust_name,
+            ]
+        ], 200);
     }
 
     /**
