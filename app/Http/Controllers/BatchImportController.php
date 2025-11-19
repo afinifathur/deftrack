@@ -13,9 +13,6 @@ use Carbon\Carbon;
 
 class BatchImportController extends Controller
 {
-    /**
-     * Tampilkan daftar import session dengan jumlah batch.
-     */
     public function index()
     {
         $sessions = ImportSession::withCount('batches')
@@ -25,9 +22,6 @@ class BatchImportController extends Controller
         return view('imports.index', compact('sessions'));
     }
 
-    /**
-     * Form untuk membuat import session baru.
-     */
     public function create()
     {
         $departments = Department::where('is_active', 1)->orderBy('name')->get();
@@ -36,13 +30,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Simpan import CSV dan batch ke database.
-     *
-     * Process:
-     * - create ImportSession
-     * - parse CSV (header mapping)
-     * - for each row: update existing Batch (preserve batch_code) or create new Batch (generate batch_code)
-     * - save new fields (aisi, size, line, cust_name) if present
+     * Store CSV import -> membuat ImportSession + Batch (create / update)
      */
     public function store(Request $request)
     {
@@ -57,17 +45,6 @@ class BatchImportController extends Controller
             return redirect()->back()->withErrors($validator)->withInput();
         }
 
-        // Create import session record
-        $session = ImportSession::create([
-            'date'          => Carbon::parse($request->date)->toDateString(),
-            'department_id' => $request->department_id,
-            'created_by'    => auth()->id() ?? 1,
-            'note'          => $request->note,
-        ]);
-
-        $ins = 0;
-        $upd = 0;
-
         $file = $request->file('file');
         if (!$file || !$file->isValid()) {
             return redirect()->back()->with('error', 'File tidak valid.');
@@ -78,21 +55,24 @@ class BatchImportController extends Controller
             return redirect()->back()->with('error', 'Gagal membuka file.');
         }
 
+        $ins = 0;
+        $upd = 0;
+
         try {
-            // read header and normalize
+            // baca header
             $rawHeader = fgetcsv($handle);
             if ($rawHeader === false) {
                 throw new \RuntimeException('File CSV kosong atau rusak.');
             }
 
+            // normalisasi header
             $header = array_map(function ($h) {
                 $h = (string) $h;
-                // remove BOM if present
-                $h = preg_replace('/^\x{FEFF}/u', '', $h);
+                $h = preg_replace('/^\x{FEFF}/u', '', $h); // remove BOM
                 return Str::of($h)->lower()->trim()->replace([' ', '.'], '_')->__toString();
             }, $rawHeader);
 
-            // canonical map including extra fields
+            // canonical map untuk menangani variasi nama kolom
             $canonicalMap = [
                 'heat_number'   => ['heat_number', 'heatno', 'heat_no', 'hn', 'heat'],
                 'item_code'     => ['item_code', 'code', 'itemcode', 'kode_item', 'kode'],
@@ -106,106 +86,120 @@ class BatchImportController extends Controller
                 'cust_name'     => ['cust_name', 'customer', 'cust', 'customer_name', 'nama_customer'],
             ];
 
-            // map header positions to canonical keys
+            // buat map header index -> canonical key
             $map = [];
             foreach ($header as $i => $h) {
                 foreach ($canonicalMap as $canon => $aliases) {
                     if (in_array($h, $aliases, true)) {
                         $map[$canon] = $i;
+                        break;
                     }
                 }
             }
 
-            // require minimal columns
             if (!isset($map['heat_number']) || !isset($map['item_code'])) {
                 throw new \RuntimeException('CSV harus memiliki kolom Heat Number dan Item Code.');
             }
 
-            DB::beginTransaction();
-
-            // starting sequence: count existing batches for session (should be 0 just after create)
-            $seq = $session->batches()->count();
-
+            // baca seluruh baris
+            $rows = [];
             while (($row = fgetcsv($handle)) !== false) {
-                // skip empty lines
                 if (count(array_filter($row, fn($c) => trim((string)$c) !== '')) === 0) {
                     continue;
                 }
+                $rows[] = $row;
+            }
 
-                $hn = isset($map['heat_number']) ? trim((string)($row[$map['heat_number']] ?? '')) : '';
-                $ic = isset($map['item_code']) ? trim((string)($row[$map['item_code']] ?? '')) : '';
+            // proses di dalam transaction
+            DB::beginTransaction();
+            try {
+                $session = ImportSession::create([
+                    'date'          => Carbon::parse($request->date)->toDateString(),
+                    'department_id' => $request->department_id,
+                    'created_by'    => auth()->id() ?? 1,
+                    'note'          => $request->note,
+                ]);
 
-                if ($hn === '' || $ic === '') {
-                    // skip rows without identifiers
-                    continue;
-                }
+                $seen = [];
 
-                $itemName    = isset($map['item_name'])      ? trim((string)($row[$map['item_name']] ?? '')) : null;
-                $weightPerPc = isset($map['weight_per_pc']) ? $this->toFloat($row[$map['weight_per_pc']] ?? null) : null;
-                $batchQty    = isset($map['batch_qty'])     ? (int) ($row[$map['batch_qty']] ?? 0) : null;
-                $castRaw     = isset($map['cast_date'])     ? trim((string)($row[$map['cast_date']] ?? '')) : null;
-                $castDate    = $castRaw ? $this->normalizeDate($castRaw, $session->date) : $session->date;
+                foreach ($rows as $row) {
+                    $hn = isset($map['heat_number']) ? trim((string)($row[$map['heat_number']] ?? '')) : '';
+                    $ic = isset($map['item_code']) ? trim((string)($row[$map['item_code']] ?? '')) : '';
 
-                // additional fields
-                $aisi     = isset($map['aisi'])     ? trim((string)($row[$map['aisi']] ?? '')) : null;
-                $size     = isset($map['size'])     ? trim((string)($row[$map['size']] ?? '')) : null;
-                $line     = isset($map['line'])     ? trim((string)($row[$map['line']] ?? '')) : null;
-                $custName = isset($map['cust_name'])? trim((string)($row[$map['cust_name']] ?? '')) : null;
+                    if ($hn === '' || $ic === '') {
+                        continue;
+                    }
 
-                // find existing batch by heat_number + item_code
-                $batch = Batch::where('heat_number', $hn)
-                              ->where('item_code', $ic)
-                              ->first();
+                    $key = $hn . '||' . $ic;
+                    if (isset($seen[$key])) {
+                        continue;
+                    }
+                    $seen[$key] = true;
 
-                if ($batch) {
-                    // update existing (preserve existing batch_code)
-                    $batch->item_name = ($itemName !== null && $itemName !== '') ? $itemName : $batch->item_name;
-                    $batch->weight_per_pc = $weightPerPc !== null ? $weightPerPc : $batch->weight_per_pc;
-                    $batch->batch_qty = ($batchQty !== null && $batchQty !== 0) ? $batchQty : $batch->batch_qty;
-                    $batch->cast_date = $castDate ?: $batch->cast_date;
-                    // ensure association with this import session
-                    $batch->import_session_id = $session->id;
+                    $itemName    = isset($map['item_name'])      ? trim((string)($row[$map['item_name']] ?? '')) : null;
+                    $weightPerPc = isset($map['weight_per_pc']) ? $this->toFloat($row[$map['weight_per_pc']] ?? null) : null;
+                    $batchQty    = isset($map['batch_qty'])     ? (int) ($row[$map['batch_qty']] ?? 0) : 0;
+                    $castRaw     = isset($map['cast_date'])     ? trim((string)($row[$map['cast_date']] ?? '')) : null;
+                    $castDate    = $castRaw ? $this->normalizeDate($castRaw, $session->date) : $session->date;
 
-                    // update additional fields only if provided in CSV (non-empty)
-                    $batch->aisi = ($aisi !== null && $aisi !== '') ? $aisi : $batch->aisi;
-                    $batch->size = ($size !== null && $size !== '') ? $size : $batch->size;
-                    $batch->line = ($line !== null && $line !== '') ? $line : $batch->line;
-                    $batch->cust_name = ($custName !== null && $custName !== '') ? $custName : $batch->cust_name;
+                    // fields tambahan
+                    $aisi     = isset($map['aisi'])     ? trim((string)($row[$map['aisi']] ?? '')) : null;
+                    $size     = isset($map['size'])     ? trim((string)($row[$map['size']] ?? '')) : null;
+                    $line     = isset($map['line'])     ? trim((string)($row[$map['line']] ?? '')) : null;
+                    $custName = isset($map['cust_name'])? trim((string)($row[$map['cust_name']] ?? '')) : null;
 
-                    $batch->save();
-                    $upd++;
-                } else {
-                    // create new batch and generate batch_code for the session
-                    $seq++;
-                    $batchCode = $this->generateBatchCodeForSession($session->date, $seq);
-
-                    $batch = Batch::create([
-                        'heat_number'       => $hn,
-                        'item_code'         => $ic,
-                        'item_name'         => $itemName ?: null,
-                        'weight_per_pc'     => $weightPerPc ?? 0,
-                        'batch_qty'         => $batchQty ?? 0,
+                    $batchData = [
+                        'item_name'         => $itemName !== '' ? $itemName : null,
+                        'weight_per_pc'     => $weightPerPc !== null ? $weightPerPc : 0,
+                        'batch_qty'         => $batchQty,
                         'cast_date'         => $castDate,
                         'import_session_id' => $session->id,
-                        'batch_code'        => $batchCode,
                         'aisi'              => $aisi ?: null,
                         'size'              => $size ?: null,
                         'line'              => $line ?: null,
                         'cust_name'         => $custName ?: null,
-                    ]);
+                    ];
 
-                    $ins++;
-                }
+                    // cari existing batch by heat_number + item_code
+                    $existingBatch = Batch::where('heat_number', $hn)
+                        ->where('item_code', $ic)
+                        ->first();
+
+                    if ($existingBatch) {
+                        // update fields (tidak override batch_code)
+                        $existingBatch->fill(array_merge(
+                            // hanya set field yang valid (include zeros)
+                            array_filter($batchData, fn($v) => $v !== null || $v === 0)
+                        ));
+                        $existingBatch->import_session_id = $session->id;
+                        $existingBatch->save();
+                        $upd++;
+                    } else {
+                        // buat batch baru; hitung seq dengan lock untuk mencegah race
+                        $seqCount = $session->batches()->lockForUpdate()->count();
+                        $seq = $seqCount + 1;
+                        $batchCode = $this->generateBatchCodeForSession($session->date, $seq);
+
+                        $createData = array_merge([
+                            'heat_number' => $hn,
+                            'item_code'   => $ic,
+                            'batch_code'  => $batchCode,
+                        ], $batchData);
+
+                        Batch::create($createData);
+                        $ins++;
+                    }
+                } // end foreach rows
+
+                DB::commit();
+            } catch (\Throwable $e) {
+                DB::rollBack();
+                throw $e;
             }
-
-            DB::commit();
         } catch (\Throwable $e) {
-            DB::rollBack();
-            // make sure file handle closed before redirecting
             if (is_resource($handle)) {
                 fclose($handle);
             }
-            // \Log::error('Batch import error: '.$e->getMessage(), ['exception' => $e]);
             return redirect()->back()->with('error', 'Terjadi error saat mengimpor CSV: ' . $e->getMessage());
         } finally {
             if (is_resource($handle)) {
@@ -218,7 +212,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Tampilkan detail import session beserta batch-nya.
+     * Show session detail
      */
     public function show(ImportSession $importSession)
     {
@@ -228,7 +222,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Form edit untuk batch hasil import (menampilkan rows yang dapat diedit).
+     * Edit view -> menampilkan editable rows
      */
     public function edit(ImportSession $importSession)
     {
@@ -238,7 +232,8 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Update batch-batch yang dikirim dari form edit.
+     * Update batches dari form edit
+     * Expect: $request->input('batches') => associative array [id => [...fields...]]
      */
     public function update(Request $request, ImportSession $importSession)
     {
@@ -251,7 +246,10 @@ class BatchImportController extends Controller
         DB::beginTransaction();
         try {
             foreach ($data as $id => $row) {
-                $rowValidator = Validator::make((array)$row, [
+                // cast to array to be safe
+                $row = (array) $row;
+
+                $rowValidator = Validator::make($row, [
                     'heat_number'   => 'required|string',
                     'item_code'     => 'required|string',
                     'item_name'     => 'nullable|string',
@@ -265,11 +263,14 @@ class BatchImportController extends Controller
                 ]);
 
                 if ($rowValidator->fails()) {
-                    // skip invalid row
+                    // skip invalid row (alternatif: collect errors)
                     continue;
                 }
 
-                $batch = Batch::where('id', $id)->where('import_session_id', $importSession->id)->first();
+                $batch = Batch::where('id', $id)
+                    ->where('import_session_id', $importSession->id)
+                    ->first();
+
                 if (!$batch) {
                     continue;
                 }
@@ -277,8 +278,12 @@ class BatchImportController extends Controller
                 $batch->heat_number = $row['heat_number'];
                 $batch->item_code = $row['item_code'];
                 $batch->item_name = $row['item_name'] ?? $batch->item_name;
-                $batch->weight_per_pc = isset($row['weight_per_pc']) ? (float)$row['weight_per_pc'] : $batch->weight_per_pc;
-                $batch->batch_qty = isset($row['batch_qty']) ? (int)$row['batch_qty'] : $batch->batch_qty;
+                $batch->weight_per_pc = array_key_exists('weight_per_pc', $row) && $row['weight_per_pc'] !== '' 
+                    ? (float)$row['weight_per_pc'] 
+                    : $batch->weight_per_pc;
+                $batch->batch_qty = array_key_exists('batch_qty', $row) && $row['batch_qty'] !== '' 
+                    ? (int)$row['batch_qty'] 
+                    : $batch->batch_qty;
 
                 if (!empty($row['cast_date'])) {
                     try {
@@ -288,11 +293,19 @@ class BatchImportController extends Controller
                     }
                 }
 
-                // additional fields
-                $batch->aisi = array_key_exists('aisi', $row) ? ($row['aisi'] ?? $batch->aisi) : $batch->aisi;
-                $batch->size = array_key_exists('size', $row) ? ($row['size'] ?? $batch->size) : $batch->size;
-                $batch->line = array_key_exists('line', $row) ? ($row['line'] ?? $batch->line) : $batch->line;
-                $batch->cust_name = array_key_exists('cust_name', $row) ? ($row['cust_name'] ?? $batch->cust_name) : $batch->cust_name;
+                // fields tambahan (jaga jika key ada, boleh kosong untuk clear)
+                if (array_key_exists('aisi', $row)) {
+                    $batch->aisi = $row['aisi'] === '' ? null : $row['aisi'];
+                }
+                if (array_key_exists('size', $row)) {
+                    $batch->size = $row['size'] === '' ? null : $row['size'];
+                }
+                if (array_key_exists('line', $row)) {
+                    $batch->line = $row['line'] === '' ? null : $row['line'];
+                }
+                if (array_key_exists('cust_name', $row)) {
+                    $batch->cust_name = $row['cust_name'] === '' ? null : $row['cust_name'];
+                }
 
                 $batch->save();
             }
@@ -300,7 +313,6 @@ class BatchImportController extends Controller
             DB::commit();
         } catch (\Throwable $e) {
             DB::rollBack();
-            // \Log::error('Batch update error: '.$e->getMessage());
             return back()->with('error', 'Terjadi kesalahan saat memperbarui batch: ' . $e->getMessage());
         }
 
@@ -308,7 +320,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Hapus import session beserta batch-batchnya (soft delete jika model support).
+     * Delete session + batches (soft delete jika model support)
      */
     public function destroy(ImportSession $importSession)
     {
@@ -321,8 +333,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Generate batch_code deterministik per session.
-     * Format: CR-YYYYMMDD-XX (XX = 2-digit sequence)
+     * Batch code format: CR-YYYYMMDD-XX
      */
     protected function generateBatchCodeForSession(string $sessionDate, int $seq): string
     {
@@ -331,9 +342,6 @@ class BatchImportController extends Controller
         return "CR-{$d}-{$idx}";
     }
 
-    /**
-     * Helper: normalize date or fallback to default.
-     */
     protected function normalizeDate($value, $fallback)
     {
         try {
@@ -343,9 +351,6 @@ class BatchImportController extends Controller
         }
     }
 
-    /**
-     * Helper: convert localized decimal with comma to float
-     */
     protected function toFloat($value)
     {
         if ($value === null || $value === '') return null;

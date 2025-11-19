@@ -25,8 +25,10 @@
           <select id="departmentSelect" name="department_id" class="form-select" required>
             <option value="">— Pilih Departemen —</option>
             @foreach($departments as $dep)
-              {{-- value: id (server expects department_id), data-name: department name (for nextBatchCode) --}}
-              <option value="{{ $dep->id }}" data-name="{{ $dep->name }}">{{ $dep->name }}</option>
+              <option value="{{ $dep->id }}" data-name="{{ $dep->name }}"
+                @if(old('department_id') == $dep->id) selected @endif>
+                {{ $dep->name }}
+              </option>
             @endforeach
           </select>
         </div>
@@ -46,38 +48,38 @@
                 name="lines[{{ $i }}][heat_number]"
                 placeholder="cth: H240901"
                 autocomplete="off"
+                value="{{ old("lines.$i.heat_number", '') }}"
               >
-              {{-- suggestion container injected by JS --}}
             </div>
 
             <div class="col-md-2">
               <label class="form-label">Item Code</label>
-              <input type="text" class="form-control item-code" name="lines[{{ $i }}][item_code]" readonly>
+              <input type="text" class="form-control item-code" name="lines[{{ $i }}][item_code]" readonly value="{{ old("lines.$i.item_code", '') }}">
             </div>
 
             <div class="col-md-3">
               <label class="form-label">Item Name</label>
-              <input type="text" class="form-control item-name" name="lines[{{ $i }}][item_name]" readonly>
+              <input type="text" class="form-control item-name" name="lines[{{ $i }}][item_name]" readonly value="{{ old("lines.$i.item_name", '') }}">
             </div>
 
             <div class="col-md-1">
               <label class="form-label">AISI</label>
-              <input type="text" class="form-control aisi" name="lines[{{ $i }}][aisi]" readonly>
+              <input type="text" class="form-control aisi" name="lines[{{ $i }}][aisi]" readonly value="{{ old("lines.$i.aisi", '') }}">
             </div>
 
             <div class="col-md-1">
               <label class="form-label">Size</label>
-              <input type="text" class="form-control size" name="lines[{{ $i }}][size]" readonly>
+              <input type="text" class="form-control size" name="lines[{{ $i }}][size]" readonly value="{{ old("lines.$i.size", '') }}">
             </div>
 
             <div class="col-md-2">
               <label class="form-label">Line</label>
-              <input type="text" class="form-control line" name="lines[{{ $i }}][line]" readonly>
+              <input type="text" class="form-control line" name="lines[{{ $i }}][line]" readonly value="{{ old("lines.$i.line", '') }}">
             </div>
 
             <div class="col-md-2">
               <label class="form-label">Cust</label>
-              <input type="text" class="form-control cust_name" name="lines[{{ $i }}][cust_name]" readonly>
+              <input type="text" class="form-control cust_name" name="lines[{{ $i }}][cust_name]" readonly value="{{ old("lines.$i.cust_name", '') }}">
             </div>
 
             <div class="col-md-1">
@@ -95,7 +97,7 @@
               <select class="form-select category" name="lines[{{ $i }}][defect_type_id]">
                 <option value="">— Pilih Kategori —</option>
                 @foreach($types->where('parent_id', null) as $t)
-                  <option value="{{ $t->id }}">{{ $t->name }}</option>
+                  <option value="{{ $t->id }}" @if(old("lines.$i.defect_type_id") == $t->id) selected @endif>{{ $t->name }}</option>
                 @endforeach
               </select>
             </div>
@@ -103,7 +105,7 @@
           </div>
 
           {{-- hidden batch_code per line (filled by JS or server) --}}
-          <input type="hidden" name="lines[{{ $i }}][batch_code]" value="">
+          <input type="hidden" name="lines[{{ $i }}][batch_code]" value="{{ old("lines.$i.batch_code", '') }}" class="batch-code-hidden">
 
           <div class="d-flex justify-content-end mt-2 gap-2">
             <button type="button" class="btn btn-outline-secondary btn-sm add-line">+ Tambah Baris</button>
@@ -132,13 +134,9 @@ document.addEventListener('DOMContentLoaded', function () {
     return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
   };
 
-  // server-provided type tree: [{id, name, children:[{id,name}]}]
-  const typeTree = @json($typeTree ?? []);
-
-  function safeChildren(parentId) {
-    if (!Array.isArray(typeTree)) return [];
-    const node = typeTree.find(t => String(t.id) === String(parentId));
-    return (node && Array.isArray(node.children)) ? node.children : [];
+  function escapeHtml(s) {
+    if (!s) return '';
+    return String(s).replace(/[&<>"'`=\/]/g, c => '&#' + c.charCodeAt(0) + ';');
   }
 
   // ---------- Endpoints ----------
@@ -146,7 +144,7 @@ document.addEventListener('DOMContentLoaded', function () {
   const nextCodeUrl = "{{ route('api.nextBatchCode') }}";  // ?departemen=...&date=...
   const itemInfoUrl = "{{ route('api.itemInfo') }}";       // ?heat=...
 
-  // cache for next batch code by deptName::date
+  // simple cache
   const nextCodeCache = {};
 
   async function fetchNextBatchCode(deptName, date) {
@@ -160,7 +158,7 @@ document.addEventListener('DOMContentLoaded', function () {
       const res = await fetch(url.toString(), { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
       if (!res.ok) return null;
       const j = await res.json();
-      if (j && j.status === 'ok') {
+      if (j && j.status === 'ok' && j.code) {
         nextCodeCache[key] = j.code;
         return j.code;
       }
@@ -175,11 +173,12 @@ document.addEventListener('DOMContentLoaded', function () {
     try {
       const url = new URL(heatUrl, window.location.origin);
       url.searchParams.set('prefix', prefix);
-      const res = await fetch(url.toString(), { headers: { 'Accept': 'application/json' } });
+      const res = await fetch(url.toString(), { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
       if (!res.ok) return [];
       const j = await res.json();
       return (j && Array.isArray(j.data)) ? j.data : [];
     } catch (e) {
+      console.error('fetchHeatSuggestions', e);
       return [];
     }
   }
@@ -189,13 +188,13 @@ document.addEventListener('DOMContentLoaded', function () {
     try {
       const url = new URL(itemInfoUrl, window.location.origin);
       url.searchParams.set('heat', heat);
-      const res = await fetch(url.toString(), { headers: { 'Accept': 'application/json' } });
+      const res = await fetch(url.toString(), { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
       if (!res.ok) return null;
       const j = await res.json();
-      // prefer {status: 'ok', data: {...}}, but accept older shapes
-      if (j && j.status === 'ok') return j.data;
-      if (j && j.data) return j.data;
-      return j;
+      if (!j) return null;
+      // prefer {status: 'ok', data: {...}}
+      if (j.status === 'ok') return j.data || null;
+      return j.data || null;
     } catch (e) {
       console.error('fetchItemInfoByHeat', e);
     }
@@ -233,7 +232,6 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     let html = '<div class="list-group list-group-flush">';
     items.forEach(it => {
-      // expected fields from heat API: heat_number, item_code, item_name, maybe batch_code
       html += `<button type="button" class="list-group-item list-group-item-action py-2 small"
                         data-heat="${escapeHtml(it.heat_number)}"
                         data-item="${escapeHtml(it.item_code)}"
@@ -255,11 +253,6 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  function escapeHtml(s) {
-    if (!s) return '';
-    return String(s).replace(/[&<>"'`=\/]/g, c => '&#' + c.charCodeAt(0) + ';');
-  }
-
   // ---------- Row wiring ----------
   function wireRow(rowEl) {
     if (!rowEl || rowEl.dataset.wired === '1') return;
@@ -275,78 +268,46 @@ document.addEventListener('DOMContentLoaded', function () {
     const cat = rowEl.querySelector('.category');
     const suggestBox = ensureSuggestBox(rowEl);
 
-    // category -> (no subcategory in new UI) still keep children mapping if you want to populate something later
     if (cat) {
-      cat.addEventListener('change', function () {
-        // placeholder for future behavior on category change
-      }, { passive: true });
+      // placeholder for future: populate subcategories if needed
+      cat.addEventListener('change', () => {}, { passive: true });
     }
 
-    // heat autocomplete + selection behavior: fills item fields and batch_code (via item-info)
     if (heatInput) {
-      const doFetch = debounce(async function () {
+      const doFetchSuggest = debounce(async function () {
         const q = heatInput.value.trim();
         if (q.length < 1) { renderSuggestions(suggestBox, [], ()=>{}); return; }
         const items = await fetchHeatSuggestions(q);
         renderSuggestions(suggestBox, items, async function (heat, item, batch) {
           heatInput.value = heat;
           if (itemInput) itemInput.value = item || '';
-          // if suggestion had a batch code, tentatively set it; otherwise item-info fetch will set
           if (batch) {
             heatInput.dataset.batchCode = batch;
             setLineBatchCode(rowEl, batch);
           }
           renderSuggestions(suggestBox, [], ()=>{});
-
-          // fetch full item info by heat and populate read-only fields + batch_code
+          // fetch full item info
           const info = await fetchItemInfoByHeat(heat);
-          if (info) {
-            if (itemInput && info.item_code) itemInput.value = info.item_code;
-            if (itemNameInput && info.item_name) itemNameInput.value = info.item_name;
-            if (aisiInput && info.aisi) aisiInput.value = info.aisi;
-            if (sizeInput && info.size) sizeInput.value = info.size;
-            if (lineInput && info.line) lineInput.value = info.line;
-            if (custInput && info.cust_name) custInput.value = info.cust_name;
-            if (info.batch_code) {
-              heatInput.dataset.batchCode = info.batch_code;
-              setLineBatchCode(rowEl, info.batch_code);
-            }
-          }
+          if (info) populateInfoToRow(rowEl, info);
         });
-      }, 300);
+      }, 250);
 
-      heatInput.addEventListener('input', doFetch);
-      heatInput.addEventListener('focus', doFetch);
+      heatInput.addEventListener('input', doFetchSuggest);
+      heatInput.addEventListener('focus', doFetchSuggest);
 
-      // also, when the heat input loses focus or is changed manually, try to fetch item-info
+      // on change/blur try to fill fields
       heatInput.addEventListener('change', debounce(async function () {
         const h = heatInput.value.trim();
         if (!h) {
-          // clear dependent fields
-          if (itemInput) itemInput.value = '';
-          if (itemNameInput) itemNameInput.value = '';
-          if (aisiInput) aisiInput.value = '';
-          if (sizeInput) sizeInput.value = '';
-          if (lineInput) lineInput.value = '';
-          if (custInput) custInput.value = '';
+          clearDependentFields(rowEl);
           setLineBatchCode(rowEl, '');
           return;
         }
         const info = await fetchItemInfoByHeat(h);
-        if (info) {
-          if (itemInput && info.item_code) itemInput.value = info.item_code;
-          if (itemNameInput && info.item_name) itemNameInput.value = info.item_name;
-          if (aisiInput && info.aisi) aisiInput.value = info.aisi;
-          if (sizeInput && info.size) sizeInput.value = info.size;
-          if (lineInput && info.line) lineInput.value = info.line;
-          if (custInput && info.cust_name) custInput.value = info.cust_name;
-          if (info.batch_code) {
-            heatInput.dataset.batchCode = info.batch_code;
-            setLineBatchCode(rowEl, info.batch_code);
-          }
-        }
-      }, 250));
+        if (info) populateInfoToRow(rowEl, info);
+      }, 200));
 
+      // click outside to hide suggestions
       document.addEventListener('click', function (ev) {
         if (suggestBox && !suggestBox.contains(ev.target) && ev.target !== heatInput) {
           suggestBox.style.display = 'none';
@@ -354,12 +315,42 @@ document.addEventListener('DOMContentLoaded', function () {
       });
     }
 
-    // add-line & remove-line buttons
+    // add/remove buttons
     const addBtn = rowEl.querySelector('.add-line');
     if (addBtn) addBtn.addEventListener('click', () => addNewLineRow(rowEl), { passive: true });
 
     const removeBtn = rowEl.querySelector('.remove-line');
     if (removeBtn) removeBtn.addEventListener('click', () => removeLineRow(rowEl), { passive: true });
+  }
+
+  function populateInfoToRow(rowEl, info) {
+    const itemInput = rowEl.querySelector('.item-code');
+    const itemNameInput = rowEl.querySelector('.item-name');
+    const aisiInput = rowEl.querySelector('.aisi');
+    const sizeInput = rowEl.querySelector('.size');
+    const lineInput = rowEl.querySelector('.line');
+    const custInput = rowEl.querySelector('.cust_name');
+    const heatInput = rowEl.querySelector('.heat');
+
+    if (itemInput && info.item_code) itemInput.value = info.item_code;
+    if (itemNameInput && info.item_name) itemNameInput.value = info.item_name;
+    if (aisiInput && info.aisi) aisiInput.value = info.aisi;
+    if (sizeInput && info.size) sizeInput.value = info.size;
+    if (lineInput && info.line) lineInput.value = info.line;
+    if (custInput && info.cust_name) custInput.value = info.cust_name;
+
+    if (heatInput && info.batch_code) {
+      heatInput.dataset.batchCode = info.batch_code;
+      setLineBatchCode(rowEl, info.batch_code);
+    }
+  }
+
+  function clearDependentFields(rowEl) {
+    ['.item-code', '.item-name', '.aisi', '.size', '.line', '.cust_name'].forEach(sel=>{
+      const el = rowEl.querySelector(sel);
+      if (el && el.hasAttribute('readonly')) el.value = '';
+      else if (el) el.value = '';
+    });
   }
 
   function getRowIndex(rowEl) {
@@ -369,17 +360,22 @@ document.addEventListener('DOMContentLoaded', function () {
     return m ? parseInt(m[1], 10) : 0;
   }
 
-  function setLineBatchCode(rowEl, batchOrCode) {
-    const code = (typeof batchOrCode === 'string') ? batchOrCode : (batchOrCode.batch_code || '');
-    let hid = rowEl.querySelector('input[type="hidden"][name*="[batch_code]"]');
-    if (!hid) {
-      hid = document.createElement('input');
-      hid.type = 'hidden';
-      rowEl.appendChild(hid);
-    }
+  function setLineBatchCode(rowEl, code) {
+    const hid = rowEl.querySelector('input.batch-code-hidden');
     const idx = getRowIndex(rowEl);
-    hid.name = `lines[${idx}][batch_code]`;
-    hid.value = code || '';
+    if (hid) {
+      hid.name = `lines[${idx}][batch_code]`;
+      hid.value = code || '';
+    } else {
+      const newH = document.createElement('input');
+      newH.type = 'hidden';
+      newH.className = 'batch-code-hidden';
+      newH.name = `lines[${idx}][batch_code]`;
+      newH.value = code || '';
+      rowEl.appendChild(newH);
+    }
+
+    // show a small badge for visual feedback
     let badge = rowEl.querySelector('.badge-batch-code');
     if (!badge) {
       badge = document.createElement('span');
@@ -388,6 +384,7 @@ document.addEventListener('DOMContentLoaded', function () {
       header.insertBefore(badge, header.firstChild);
     }
     badge.textContent = code || '';
+    if (!code && badge) badge.remove();
   }
 
   function addNewLineRow(fromRow) {
@@ -397,14 +394,14 @@ document.addEventListener('DOMContentLoaded', function () {
     const clone = fromRow.cloneNode(true);
     clone.dataset.wired = '0';
 
-    // update names & clear values
+    // clear values & update names
     clone.querySelectorAll('input,select,textarea').forEach(el => {
       if (el.name) el.name = el.name.replace(/\[\d+\]/g, '[' + idx + ']');
 
       if (el.tagName === 'SELECT') {
         el.selectedIndex = 0;
       } else if (el.type === 'hidden') {
-        if (el.name && el.name.includes('[batch_code]')) el.value = '';
+        if (el.classList.contains('batch-code-hidden')) el.value = '';
       } else {
         el.value = '';
         if (el.hasAttribute('checked')) el.removeAttribute('checked');
@@ -417,6 +414,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     container.appendChild(clone);
     wireRow(clone);
+    // try assign batch code for new row
     assignBatchCodeToNewRow(clone);
   }
 
@@ -430,12 +428,11 @@ document.addEventListener('DOMContentLoaded', function () {
           if (el.type === 'number') el.value = null; else el.value = '';
         } else if (el.tagName === 'SELECT') el.selectedIndex = 0;
       });
-      const hid = rowEl.querySelector('input[type="hidden"][name*="[batch_code]"]'); if (hid) hid.value = '';
+      const hid = rowEl.querySelector('input.batch-code-hidden'); if (hid) hid.value = '';
       const badge = rowEl.querySelector('.badge-batch-code'); if (badge) badge.remove();
       return;
     }
     rowEl.remove();
-    // reindex remaining names
     reindexAllRows();
   }
 
@@ -451,13 +448,11 @@ document.addEventListener('DOMContentLoaded', function () {
     if (code) setLineBatchCode(rowEl, code);
   }
 
-  // ---------- Helpers for submit ----------
   function isRowFilled(row) {
-    // Criteria: heat present OR item_code present OR qty_pcs > 0 OR defect_type selected
-    const heat = (row.querySelector('input[name^="lines"][name$="[heat_number]"]') || {}).value || '';
-    const item = (row.querySelector('input[name^="lines"][name$="[item_code]"]') || {}).value || '';
-    const pcs = parseFloat((row.querySelector('input[name^="lines"][name$="[qty_pcs]"]') || {}).value || 0);
-    const type = (row.querySelector('select[name^="lines"][name$="[defect_type_id]"]') || {}).value || '';
+    const heat = (row.querySelector('.heat') || {}).value || '';
+    const item = (row.querySelector('.item-code') || {}).value || '';
+    const pcs = parseFloat((row.querySelector('input[name*="[qty_pcs]"]') || {}).value || 0);
+    const type = (row.querySelector('select[name*="[defect_type_id]"]') || {}).value || '';
     return (heat.trim() !== '' || item.trim() !== '' || pcs > 0 || (type && type !== ''));
   }
 
@@ -467,18 +462,16 @@ document.addEventListener('DOMContentLoaded', function () {
       row.querySelectorAll('[name]').forEach(el => {
         el.name = el.name.replace(/lines\[\d+\]/, `lines[${idx}]`);
       });
-      // update hidden batch_code name if present
-      const hid = row.querySelector('input[type="hidden"][name*="[batch_code]"]');
+      const hid = row.querySelector('input.batch-code-hidden');
       if (hid) hid.name = `lines[${idx}][batch_code]`;
-      // ensure badge shows correct if exists
       const badge = row.querySelector('.badge-batch-code');
       if (badge && badge.textContent === '') badge.remove();
     });
   }
 
   // Before submit: remove empty rows, reindex names
-  document.getElementById('defectForm').addEventListener('submit', function (ev) {
-    // collect rows and remove those not filled
+  const form = document.getElementById('defectForm');
+  form.addEventListener('submit', function (ev) {
     const container = document.getElementById('lines');
     const rows = Array.from(container.querySelectorAll('.line-row'));
     const filled = rows.filter(isRowFilled);
@@ -490,12 +483,12 @@ document.addEventListener('DOMContentLoaded', function () {
       }
     }
 
-    // remove empty rows from DOM
+    // remove empty rows
     rows.forEach(r => { if (!isRowFilled(r)) r.remove(); });
 
-    // reindex remaining rows to sequential indexes
+    // reindex remaining rows
     reindexAllRows();
-    // allow form to submit
+    // allow submit
   });
 
   // ---------- initial wiring ----------
@@ -525,7 +518,7 @@ document.addEventListener('DOMContentLoaded', function () {
   if (dateEl) dateEl.addEventListener('change', debounce(updateBatchPreview, 300));
   updateBatchPreview();
 
-  // Expose a helper if other scripts/plugin want to set batch code by heat selection
+  // Expose a helper if other scripts want to set batch code programmatically
   window.__deftrack_fillBatchCodeFromHeatSelection = function (heatInputEl, batchObj) {
     if (!heatInputEl || !batchObj) return;
     heatInputEl.dataset.batchCode = batchObj.batch_code || '';

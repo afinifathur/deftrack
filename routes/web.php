@@ -140,6 +140,8 @@ Route::middleware(['auth', RoleMiddleware::class . ':kabag_qc,direktur,mr,admin'
     Route::post('/settings/types', [SettingsController::class, 'storeType'])->name('settings.types.store');
 });
 
+Route::get('imports/{importSession}/export', [ImportController::class,'export'])->name('imports.export');
+
 /*
 |--------------------------------------------------------------------------
 | Fallback
