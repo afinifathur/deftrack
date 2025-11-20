@@ -88,9 +88,15 @@
             </div>
 
             <div class="col-md-1">
-              <label class="form-label">Qty KG</label>
-              <input class="form-control" type="number" min="0" step="0.001" name="lines[{{ $i }}][qty_kg]" placeholder="0.000" value="{{ old("lines.$i.qty_kg", '') }}">
-            </div>
+  <label class="form-label">Qty KG</label>
+  <input class="form-control qty-kg" type="number" min="0" step="0.001"
+         name="lines[{{ $i }}][qty_kg]"
+         placeholder="0.000"
+         value="{{ old("lines.$i.qty_kg", '0.000') }}"
+         readonly
+         aria-readonly="true"
+         title="Diisi otomatis dari Qty PCS × Berat per PC">
+</div>
 
             <div class="col-md-3 mt-2">
               <label class="form-label">Kategori</label>
@@ -128,82 +134,114 @@
 @push('scripts')
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-  // ---------- Utilities ----------
-  const debounce = (fn, wait = 275) => {
+  // Debounce helper
+  const debounce = (fn, wait = 200) => {
     let t;
     return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
   };
 
-  function escapeHtml(s) {
-    if (!s) return '';
-    return String(s).replace(/[&<>"'`=\/]/g, c => '&#' + c.charCodeAt(0) + ';');
-  }
+  const heatApi = "{{ route('api.heat') }}";
+  const itemInfoApi = "{{ route('api.itemInfo') }}";
 
-  // ---------- Endpoints ----------
-  const heatUrl = "{{ route('api.heat') }}";               // ?prefix=...
-  const nextCodeUrl = "{{ route('api.nextBatchCode') }}";  // ?departemen=...&date=...
-  const itemInfoUrl = "{{ route('api.itemInfo') }}";       // ?heat=...
-
-  // simple cache
-  const nextCodeCache = {};
-
-  async function fetchNextBatchCode(deptName, date) {
-    if (!deptName) return null;
-    const key = `${deptName}::${date}`;
-    if (nextCodeCache[key]) return nextCodeCache[key];
-    try {
-      const url = new URL(nextCodeUrl, window.location.origin);
-      url.searchParams.set('departemen', deptName);
-      url.searchParams.set('date', date);
-      const res = await fetch(url.toString(), { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
-      if (!res.ok) return null;
-      const j = await res.json();
-      if (j && j.status === 'ok' && j.code) {
-        nextCodeCache[key] = j.code;
-        return j.code;
-      }
-    } catch (e) {
-      console.error('fetchNextBatchCode', e);
-    }
-    return null;
-  }
-
-  async function fetchHeatSuggestions(prefix) {
-    if (!prefix || prefix.length < 1) return [];
-    try {
-      const url = new URL(heatUrl, window.location.origin);
-      url.searchParams.set('prefix', prefix);
-      const res = await fetch(url.toString(), { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
-      if (!res.ok) return [];
-      const j = await res.json();
-      return (j && Array.isArray(j.data)) ? j.data : [];
-    } catch (e) {
-      console.error('fetchHeatSuggestions', e);
-      return [];
-    }
-  }
-
+  // tolerant fetch: returns data object or null
   async function fetchItemInfoByHeat(heat) {
     if (!heat) return null;
     try {
-      const url = new URL(itemInfoUrl, window.location.origin);
+      const url = new URL(itemInfoApi, window.location.origin);
       url.searchParams.set('heat', heat);
       const res = await fetch(url.toString(), { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
       if (!res.ok) return null;
       const j = await res.json();
-      if (!j) return null;
-      // prefer {status: 'ok', data: {...}}
-      if (j.status === 'ok') return j.data || null;
-      return j.data || null;
+      return j?.data ?? j ?? null;
     } catch (e) {
-      console.error('fetchItemInfoByHeat', e);
+      console.error('fetchItemInfoByHeat error', e);
+      return null;
     }
-    return null;
   }
 
-  // ---------- Suggestion UI helpers ----------
-  function ensureSuggestBox(rowEl) {
-    let box = rowEl.querySelector('.heat-suggest');
+  // helpers to find elements in a row (compatible with your blade)
+  function findHeatEl(row) {
+    return row.querySelector('.heat') || row.querySelector('input[name*="[heat"]') || row.querySelector('input[placeholder*="H"]');
+  }
+  function findQtyPcsEl(row) {
+    return row.querySelector('.qty-pcs') || row.querySelector('input[name*="[qty_pcs]"]') || row.querySelector('input[type="number"][name*="qty_pcs"]');
+  }
+  function findQtyKgEl(row) {
+    return row.querySelector('.qty-kg') || row.querySelector('input[name*="[qty_kg]"]') || row.querySelector('input[type="number"][name*="qty_kg"]');
+  }
+
+  function ensureWeightInput(row) {
+    let hid = row.querySelector('.item-weight');
+    if (!hid) {
+      hid = document.createElement('input');
+      hid.type = 'hidden';
+      hid.className = 'item-weight';
+      row.appendChild(hid);
+    }
+    return hid;
+  }
+
+  // calculate kg using hidden weight or dataset
+  function calcKgForRow(row) {
+    const pcsEl = findQtyPcsEl(row);
+    const kgEl = findQtyKgEl(row);
+    if (!kgEl) return;
+    const hid = row.querySelector('.item-weight');
+    const weight = parseFloat((hid && hid.value) || row.dataset.weight || 0) || 0;
+    const pcs = parseInt((pcsEl && pcsEl.value) || 0, 10) || 0;
+    const kg = +(pcs * weight);
+    kgEl.value = kg.toFixed(3);
+  }
+
+  // populate row fields with API data (tolerant keys)
+  function populateInfoToRow(row, info) {
+    if (!info) return;
+    const pick = (obj, keys) => { for (const k of keys) if (Object.prototype.hasOwnProperty.call(obj, k) && obj[k] !== null && obj[k] !== undefined) return obj[k]; return null; };
+
+    const itemCode = pick(info, ['item_code','itemCode','code']);
+    const itemName = pick(info, ['item_name','itemName','name']);
+    const aisi     = pick(info, ['aisi','material']);
+    const size     = pick(info, ['size']);
+    const line     = pick(info, ['line']);
+    const cust     = pick(info, ['cust_name','customer_name','cust']);
+    const batch    = pick(info, ['batch_code','batchCode']);
+    const weightV  = pick(info, ['weight_per_pc','weightPerPc','weight','wt_per_pc']);
+
+    const itemInput = row.querySelector('.item-code');
+    const itemNameInput = row.querySelector('.item-name');
+    const aisiInput = row.querySelector('.aisi');
+    const sizeInput = row.querySelector('.size');
+    const lineInput = row.querySelector('.line');
+    const custInput = row.querySelector('.cust_name');
+    const heatInput = findHeatEl(row);
+
+    if (itemInput && itemCode) itemInput.value = itemCode;
+    if (itemNameInput && itemName) itemNameInput.value = itemName;
+    if (aisiInput && aisi) aisiInput.value = aisi;
+    if (sizeInput && size) sizeInput.value = size;
+    if (lineInput && line) lineInput.value = line;
+    if (custInput && cust) custInput.value = cust;
+
+    if (heatInput && batch) {
+      heatInput.dataset.batchCode = batch;
+      // If you have setLineBatchCode elsewhere, it'll use dataset.batchCode
+    }
+
+    const weightNum = parseFloat(weightV ?? 0) || 0;
+    const hid = ensureWeightInput(row);
+    hid.value = weightNum;
+    row.dataset.weight = weightNum;
+
+    // debug (browser console)
+    console.debug('populateInfoToRow: heat=', (heatInput && heatInput.value), 'weight_per_pc=', weightNum);
+
+    // recalc kg if pcs present
+    calcKgForRow(row);
+  }
+
+  // build suggestion box for heat input
+  function ensureSuggestBox(row, heatEl) {
+    let box = row.querySelector('.heat-suggest');
     if (!box) {
       box = document.createElement('div');
       box.className = 'heat-suggest border rounded-3 bg-white position-absolute shadow-sm';
@@ -212,320 +250,186 @@ document.addEventListener('DOMContentLoaded', function () {
       box.style.right = '0';
       box.style.top = '100%';
       box.style.display = 'none';
-      const heatParent = rowEl.querySelector('.col-md-2.position-relative') || rowEl.querySelector('.col-md-2');
-      if (heatParent) {
-        heatParent.style.position = 'relative';
-        heatParent.appendChild(box);
-      } else {
-        rowEl.appendChild(box);
-      }
+      const parent = heatEl.parentElement || row;
+      parent.style.position = parent.style.position || 'relative';
+      parent.appendChild(box);
     }
     return box;
   }
 
-  function renderSuggestions(box, items, onPick) {
-    if (!box) return;
-    if (!items || items.length === 0) {
-      box.style.display = 'none';
-      box.innerHTML = '';
-      return;
-    }
-    let html = '<div class="list-group list-group-flush">';
-    items.forEach(it => {
-      html += `<button type="button" class="list-group-item list-group-item-action py-2 small"
-                        data-heat="${escapeHtml(it.heat_number)}"
-                        data-item="${escapeHtml(it.item_code)}"
-                        data-batch="${escapeHtml(it.batch_code ?? '')}">
-                <div class="fw-semibold">${escapeHtml(it.heat_number)} <span class="text-muted">/ ${escapeHtml(it.item_code)}</span></div>
-                <div class="text-muted small">${escapeHtml(it.item_name ?? '')}</div>
-              </button>`;
-    });
-    html += '</div>';
-    box.innerHTML = html;
-    box.style.display = 'block';
-    box.querySelectorAll('button').forEach(btn => {
-      btn.addEventListener('click', function () {
-        const h = this.getAttribute('data-heat');
-        const i = this.getAttribute('data-item');
-        const b = this.getAttribute('data-batch');
-        onPick(h, i, b);
-      });
-    });
-  }
+  // wire one row: autocomplete + fetch + calc
+  function wireRow(row) {
+    if (!row || row.dataset.wired === '1') return;
+    row.dataset.wired = '1';
 
-  // ---------- Row wiring ----------
-  function wireRow(rowEl) {
-    if (!rowEl || rowEl.dataset.wired === '1') return;
-    rowEl.dataset.wired = '1';
+    const heatEl = findHeatEl(row);
+    const pcsEl = findQtyPcsEl(row);
+    const kgEl = findQtyKgEl(row);
+    const suggestBox = heatEl ? ensureSuggestBox(row, heatEl) : null;
 
-    const heatInput = rowEl.querySelector('.heat');
-    const itemInput = rowEl.querySelector('.item-code');
-    const itemNameInput = rowEl.querySelector('.item-name');
-    const aisiInput = rowEl.querySelector('.aisi');
-    const sizeInput = rowEl.querySelector('.size');
-    const lineInput = rowEl.querySelector('.line');
-    const custInput = rowEl.querySelector('.cust_name');
-    const cat = rowEl.querySelector('.category');
-    const suggestBox = ensureSuggestBox(rowEl);
+    if (heatEl) {
+      const doSuggest = debounce(async () => {
+        const q = heatEl.value.trim();
+        if (!q) { if (suggestBox) { suggestBox.style.display = 'none'; suggestBox.innerHTML = ''; } return; }
 
-    if (cat) {
-      // placeholder for future: populate subcategories if needed
-      cat.addEventListener('change', () => {}, { passive: true });
-    }
+        try {
+          const url = new URL(heatApi, window.location.origin);
+          url.searchParams.set('prefix', q);
+          const res = await fetch(url.toString(), { credentials: 'same-origin', headers: { 'Accept': 'application/json' } });
+          if (!res.ok) return;
+          const j = await res.json();
+          const items = j?.data ?? [];
+          if (!items.length) { suggestBox.style.display = 'none'; suggestBox.innerHTML = ''; return; }
 
-    if (heatInput) {
-      const doFetchSuggest = debounce(async function () {
-        const q = heatInput.value.trim();
-        if (q.length < 1) { renderSuggestions(suggestBox, [], ()=>{}); return; }
-        const items = await fetchHeatSuggestions(q);
-        renderSuggestions(suggestBox, items, async function (heat, item, batch) {
-          heatInput.value = heat;
-          if (itemInput) itemInput.value = item || '';
-          if (batch) {
-            heatInput.dataset.batchCode = batch;
-            setLineBatchCode(rowEl, batch);
-          }
-          renderSuggestions(suggestBox, [], ()=>{});
-          // fetch full item info
-          const info = await fetchItemInfoByHeat(heat);
-          if (info) populateInfoToRow(rowEl, info);
-        });
-      }, 250);
+          let html = '<div class="list-group list-group-flush">';
+          items.forEach(it => {
+            html += `<button type="button" class="list-group-item list-group-item-action py-2 small"
+                        data-heat="${it.heat_number ?? ''}"
+                        data-item="${it.item_code ?? ''}"
+                        data-batch="${it.batch_code ?? ''}">
+                        <div class="fw-semibold">${(it.heat_number ?? '')} <span class="text-muted">/ ${(it.item_code ?? '')}</span></div>
+                        <div class="text-muted small">${(it.item_name ?? '')}</div>
+                     </button>`;
+          });
+          html += '</div>';
+          suggestBox.innerHTML = html;
+          suggestBox.style.display = 'block';
 
-      heatInput.addEventListener('input', doFetchSuggest);
-      heatInput.addEventListener('focus', doFetchSuggest);
+          suggestBox.querySelectorAll('button').forEach(btn => {
+            btn.addEventListener('click', async function () {
+              const h = this.getAttribute('data-heat');
+              const item = this.getAttribute('data-item');
+              const batch = this.getAttribute('data-batch');
+              heatEl.value = h || heatEl.value;
+              if (row.querySelector('.item-code')) row.querySelector('.item-code').value = item || '';
+              if (batch) heatEl.dataset.batchCode = batch;
+              suggestBox.style.display = 'none';
+              // fetch full info and populate
+              const info = await fetchItemInfoByHeat(h);
+              if (info) populateInfoToRow(row, info);
+            });
+          });
 
-      // on change/blur try to fill fields
-      heatInput.addEventListener('change', debounce(async function () {
-        const h = heatInput.value.trim();
-        if (!h) {
-          clearDependentFields(rowEl);
-          setLineBatchCode(rowEl, '');
+        } catch (err) {
+          console.error('heat suggestion error', err);
+        }
+      }, 200);
+
+      heatEl.addEventListener('input', doSuggest);
+      heatEl.addEventListener('focus', doSuggest);
+
+      heatEl.addEventListener('change', debounce(async function () {
+        const val = heatEl.value.trim();
+        if (!val) {
+          // clear dependent small fields
+          if (row.querySelector('.item-code')) row.querySelector('.item-code').value = '';
+          if (row.querySelector('.item-name')) row.querySelector('.item-name').value = '';
+          const hid = row.querySelector('.item-weight'); if (hid) hid.value = '';
+          row.dataset.weight = 0;
+          calcKgForRow(row);
           return;
         }
-        const info = await fetchItemInfoByHeat(h);
-        if (info) populateInfoToRow(rowEl, info);
+        const info = await fetchItemInfoByHeat(val);
+        if (info) populateInfoToRow(row, info);
       }, 200));
-
-      // click outside to hide suggestions
-      document.addEventListener('click', function (ev) {
-        if (suggestBox && !suggestBox.contains(ev.target) && ev.target !== heatInput) {
-          suggestBox.style.display = 'none';
-        }
-      });
     }
 
-    // add/remove buttons
-    const addBtn = rowEl.querySelector('.add-line');
-    if (addBtn) addBtn.addEventListener('click', () => addNewLineRow(rowEl), { passive: true });
-
-    const removeBtn = rowEl.querySelector('.remove-line');
-    if (removeBtn) removeBtn.addEventListener('click', () => removeLineRow(rowEl), { passive: true });
+    if (pcsEl) pcsEl.addEventListener('input', () => calcKgForRow(row));
+    if (kgEl) kgEl.addEventListener('input', () => { /* allow user override if needed */ });
   }
 
-  function populateInfoToRow(rowEl, info) {
-    const itemInput = rowEl.querySelector('.item-code');
-    const itemNameInput = rowEl.querySelector('.item-name');
-    const aisiInput = rowEl.querySelector('.aisi');
-    const sizeInput = rowEl.querySelector('.size');
-    const lineInput = rowEl.querySelector('.line');
-    const custInput = rowEl.querySelector('.cust_name');
-    const heatInput = rowEl.querySelector('.heat');
+  // initial wiring for existing rows
+  document.querySelectorAll('#lines .line-row').forEach(wireRow);
 
-    if (itemInput && info.item_code) itemInput.value = info.item_code;
-    if (itemNameInput && info.item_name) itemNameInput.value = info.item_name;
-    if (aisiInput && info.aisi) aisiInput.value = info.aisi;
-    if (sizeInput && info.size) sizeInput.value = info.size;
-    if (lineInput && info.line) lineInput.value = info.line;
-    if (custInput && info.cust_name) custInput.value = info.cust_name;
-
-    if (heatInput && info.batch_code) {
-      heatInput.dataset.batchCode = info.batch_code;
-      setLineBatchCode(rowEl, info.batch_code);
-    }
-  }
-
-  function clearDependentFields(rowEl) {
-    ['.item-code', '.item-name', '.aisi', '.size', '.line', '.cust_name'].forEach(sel=>{
-      const el = rowEl.querySelector(sel);
-      if (el && el.hasAttribute('readonly')) el.value = '';
-      else if (el) el.value = '';
-    });
-  }
-
-  function getRowIndex(rowEl) {
-    const anyNamed = rowEl.querySelector('[name]');
-    if (!anyNamed) return 0;
-    const m = anyNamed.name.match(/lines\[(\d+)\]\[/);
-    return m ? parseInt(m[1], 10) : 0;
-  }
-
-  function setLineBatchCode(rowEl, code) {
-    const hid = rowEl.querySelector('input.batch-code-hidden');
-    const idx = getRowIndex(rowEl);
-    if (hid) {
-      hid.name = `lines[${idx}][batch_code]`;
-      hid.value = code || '';
-    } else {
-      const newH = document.createElement('input');
-      newH.type = 'hidden';
-      newH.className = 'batch-code-hidden';
-      newH.name = `lines[${idx}][batch_code]`;
-      newH.value = code || '';
-      rowEl.appendChild(newH);
-    }
-
-    // show a small badge for visual feedback
-    let badge = rowEl.querySelector('.badge-batch-code');
-    if (!badge) {
-      badge = document.createElement('span');
-      badge.className = 'badge bg-secondary badge-batch-code ms-2';
-      const header = rowEl.querySelector('.row-header') || rowEl;
-      header.insertBefore(badge, header.firstChild);
-    }
-    badge.textContent = code || '';
-    if (!code && badge) badge.remove();
-  }
-
-  function addNewLineRow(fromRow) {
-    const container = document.getElementById('lines');
-    if (!container) return;
-    const idx = container.querySelectorAll('.line-row').length;
-    const clone = fromRow.cloneNode(true);
-    clone.dataset.wired = '0';
-
-    // clear values & update names
-    clone.querySelectorAll('input,select,textarea').forEach(el => {
-      if (el.name) el.name = el.name.replace(/\[\d+\]/g, '[' + idx + ']');
-
-      if (el.tagName === 'SELECT') {
-        el.selectedIndex = 0;
-      } else if (el.type === 'hidden') {
-        if (el.classList.contains('batch-code-hidden')) el.value = '';
-      } else {
-        el.value = '';
-        if (el.hasAttribute('checked')) el.removeAttribute('checked');
-      }
-      if (el.dataset) delete el.dataset.batchCode;
-    });
-
-    const oldSuggest = clone.querySelector('.heat-suggest'); if (oldSuggest) oldSuggest.remove();
-    const oldBadge = clone.querySelector('.badge-batch-code'); if (oldBadge) oldBadge.remove();
-
-    container.appendChild(clone);
-    wireRow(clone);
-    // try assign batch code for new row
-    assignBatchCodeToNewRow(clone);
-  }
-
-  function removeLineRow(rowEl) {
-    const container = document.getElementById('lines');
-    const rows = container.querySelectorAll('.line-row');
-    if (rows.length <= 1) {
-      // reset fields instead of removing last
-      rowEl.querySelectorAll('input,select,textarea').forEach(el=>{
-        if (el.tagName === 'INPUT') {
+  // handle add/remove row buttons (kept minimal to match your blade)
+  document.addEventListener('click', function (e) {
+    if (e.target.matches('.add-line')) {
+      const btn = e.target;
+      const row = btn.closest('.line-row');
+      if (!row) return;
+      const clone = row.cloneNode(true);
+      // reset values in clone
+      clone.querySelectorAll('input,select,textarea').forEach(el => {
+        if (!el) return;
+        if (el.type === 'hidden') {
+          if (el.classList.contains('batch-code-hidden')) el.value = '';
+          else el.value = '';
+        } else if (el.tagName === 'SELECT') {
+          el.selectedIndex = 0;
+        } else {
           if (el.type === 'number') el.value = null; else el.value = '';
-        } else if (el.tagName === 'SELECT') el.selectedIndex = 0;
+        }
+        if (el.dataset && el.dataset.batchCode) delete el.dataset.batchCode;
       });
-      const hid = rowEl.querySelector('input.batch-code-hidden'); if (hid) hid.value = '';
-      const badge = rowEl.querySelector('.badge-batch-code'); if (badge) badge.remove();
-      return;
+      document.getElementById('lines').appendChild(clone);
+      reindexAllRows();
+      wireRow(clone);
     }
-    rowEl.remove();
-    reindexAllRows();
-  }
 
-  async function assignBatchCodeToNewRow(rowEl) {
-    const heatInput = rowEl.querySelector('.heat');
-    if (heatInput && heatInput.dataset && heatInput.dataset.batchCode) {
-      setLineBatchCode(rowEl, heatInput.dataset.batchCode);
-      return;
+    if (e.target.matches('.remove-line')) {
+      const row = e.target.closest('.line-row');
+      if (!row) return;
+      const container = document.getElementById('lines');
+      const rows = container.querySelectorAll('.line-row');
+      if (rows.length <= 1) {
+        // reset fields instead of remove last
+        row.querySelectorAll('input,select,textarea').forEach(el=>{
+          if (!el) return;
+          if (el.tagName === 'INPUT') {
+            if (el.type === 'number') el.value = null; else el.value = '';
+          } else if (el.tagName === 'SELECT') el.selectedIndex = 0;
+        });
+        const hid = row.querySelector('input.batch-code-hidden'); if (hid) hid.value = '';
+        const badge = row.querySelector('.badge-batch-code'); if (badge) badge.remove();
+        return;
+      }
+      row.remove();
+      reindexAllRows();
     }
-    const { dept, date } = getSelectedDeptAndDate();
-    if (!dept) return;
-    const code = await fetchNextBatchCode(dept, date);
-    if (code) setLineBatchCode(rowEl, code);
-  }
+  });
 
-  function isRowFilled(row) {
-    const heat = (row.querySelector('.heat') || {}).value || '';
-    const item = (row.querySelector('.item-code') || {}).value || '';
-    const pcs = parseFloat((row.querySelector('input[name*="[qty_pcs]"]') || {}).value || 0);
-    const type = (row.querySelector('select[name*="[defect_type_id]"]') || {}).value || '';
-    return (heat.trim() !== '' || item.trim() !== '' || pcs > 0 || (type && type !== ''));
-  }
-
-  function reindexAllRows() {
+  // reindex helper (keeps form names sequential)
+  function reindexAllRows(){
     const rows = Array.from(document.querySelectorAll('#lines .line-row'));
     rows.forEach((row, idx) => {
       row.querySelectorAll('[name]').forEach(el => {
         el.name = el.name.replace(/lines\[\d+\]/, `lines[${idx}]`);
       });
-      const hid = row.querySelector('input.batch-code-hidden');
-      if (hid) hid.name = `lines[${idx}][batch_code]`;
-      const badge = row.querySelector('.badge-batch-code');
-      if (badge && badge.textContent === '') badge.remove();
+      const hid = row.querySelector('input.batch-code-hidden'); if (hid) hid.name = `lines[${idx}][batch_code]`;
+      const weight = row.querySelector('.item-weight'); if (weight) weight.name = `lines[${idx}][weight_per_pc]`;
     });
   }
 
-  // Before submit: remove empty rows, reindex names
+  // before submit: remove empty rows and reindex
   const form = document.getElementById('defectForm');
-  form.addEventListener('submit', function (ev) {
-    const container = document.getElementById('lines');
-    const rows = Array.from(container.querySelectorAll('.line-row'));
-    const filled = rows.filter(isRowFilled);
+  if (form) {
+    form.addEventListener('submit', function (ev) {
+      const rows = Array.from(document.querySelectorAll('#lines .line-row'));
+      const filled = rows.filter(row => {
+        const heat = (findHeatEl(row) && findHeatEl(row).value) || '';
+        const item = (row.querySelector('.item-code') && row.querySelector('.item-code').value) || '';
+        const pcs = parseFloat((findQtyPcsEl(row) && findQtyPcsEl(row).value) || 0) || 0;
+        return heat.trim() !== '' || item.trim() !== '' || pcs > 0;
+      });
 
-    if (filled.length === 0) {
-      if (!confirm('Tidak ada baris terisi. Tetap ingin menyimpan draft kosong?')) {
-        ev.preventDefault();
-        return;
+      if (filled.length === 0) {
+        if (!confirm('Tidak ada baris terisi. Tetap ingin menyimpan draft kosong?')) {
+          ev.preventDefault();
+          return;
+        }
       }
-    }
 
-    // remove empty rows
-    rows.forEach(r => { if (!isRowFilled(r)) r.remove(); });
+      rows.forEach(r => {
+        const heat = (findHeatEl(r) && findHeatEl(r).value) || '';
+        const item = (r.querySelector('.item-code') && r.querySelector('.item-code').value) || '';
+        const pcs = parseFloat((findQtyPcsEl(r) && findQtyPcsEl(r).value) || 0) || 0;
+        if (!(heat.trim() !== '' || item.trim() !== '' || pcs > 0)) r.remove();
+      });
 
-    // reindex remaining rows
-    reindexAllRows();
-    // allow submit
-  });
-
-  // ---------- initial wiring ----------
-  document.querySelectorAll('.line-row').forEach(wireRow);
-
-  // department/date watchers for preview
-  function getSelectedDeptAndDate() {
-    const depSel = document.getElementById('departmentSelect');
-    const dateInput = document.getElementById('dateInput');
-    if (!depSel) return { dept: null, date: (dateInput ? dateInput.value : new Date().toISOString().slice(0,10)) };
-    const selected = depSel.options[depSel.selectedIndex];
-    const deptName = selected ? (selected.dataset.name || selected.value) : null;
-    return { dept: deptName, date: dateInput ? dateInput.value : new Date().toISOString().slice(0,10) };
+      reindexAllRows();
+    });
   }
 
-  async function updateBatchPreview() {
-    const preview = document.getElementById('batchCodePreview');
-    const { dept, date } = getSelectedDeptAndDate();
-    if (!dept) { preview.textContent = '-'; return; }
-    const code = await fetchNextBatchCode(dept, date);
-    preview.textContent = code || '-';
-  }
-
-  const depEl = document.getElementById('departmentSelect');
-  const dateEl = document.getElementById('dateInput');
-  if (depEl) depEl.addEventListener('change', debounce(updateBatchPreview, 300));
-  if (dateEl) dateEl.addEventListener('change', debounce(updateBatchPreview, 300));
-  updateBatchPreview();
-
-  // Expose a helper if other scripts want to set batch code programmatically
-  window.__deftrack_fillBatchCodeFromHeatSelection = function (heatInputEl, batchObj) {
-    if (!heatInputEl || !batchObj) return;
-    heatInputEl.dataset.batchCode = batchObj.batch_code || '';
-    const row = heatInputEl.closest('.line-row');
-    if (row) setLineBatchCode(row, batchObj.batch_code || '');
-  };
-
-});
+}); // DOMContentLoaded
 </script>
 @endpush
