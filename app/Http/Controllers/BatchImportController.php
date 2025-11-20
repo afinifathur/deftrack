@@ -5,10 +5,12 @@ namespace App\Http\Controllers;
 use App\Models\Batch;
 use App\Models\ImportSession;
 use App\Models\Department;
+use App\Imports\BatchXlsxImport;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
+use Maatwebsite\Excel\Facades\Excel;
 use Carbon\Carbon;
 
 class BatchImportController extends Controller
@@ -24,20 +26,22 @@ class BatchImportController extends Controller
 
     public function create()
     {
-        $departments = Department::where('is_active', 1)->orderBy('name')->get();
+        $departments = Department::where('is_active', 1)
+            ->orderBy('name')
+            ->get();
 
         return view('imports.create', compact('departments'));
     }
 
     /**
-     * Store CSV import -> membuat ImportSession + Batch (create / update)
+     * Store import (CSV / XLSX) -> membuat ImportSession + Batch (create / update)
      */
     public function store(Request $request)
     {
         $validator = Validator::make($request->all(), [
             'date'          => 'required|date',
             'department_id' => 'required|exists:departments,id',
-            'file'          => 'required|file|mimes:csv,txt',
+            'file'          => 'required|file|mimes:csv,txt,xlsx,xls',
             'note'          => 'nullable|string',
         ]);
 
@@ -50,68 +54,22 @@ class BatchImportController extends Controller
             return redirect()->back()->with('error', 'File tidak valid.');
         }
 
-        $handle = fopen($file->getRealPath(), 'r');
-        if ($handle === false) {
-            return redirect()->back()->with('error', 'Gagal membuka file.');
-        }
-
         $ins = 0;
         $upd = 0;
 
         try {
-            // baca header
-            $rawHeader = fgetcsv($handle);
-            if ($rawHeader === false) {
-                throw new \RuntimeException('File CSV kosong atau rusak.');
+            // Baca file (XLSX / XLS / CSV / TXT) menjadi array baris ter-normalisasi
+            // Setiap baris berupa array asosiatif dengan key canonical:
+            // heat_number, item_code, item_name, weight_per_pc, batch_qty,
+            // cast_date, aisi, size, line, cust_name
+            $rows = $this->parseUploadedFile($file);
+
+            if (empty($rows)) {
+                throw new \RuntimeException('File tidak berisi data baris yang valid.');
             }
 
-            // normalisasi header
-            $header = array_map(function ($h) {
-                $h = (string) $h;
-                $h = preg_replace('/^\x{FEFF}/u', '', $h); // remove BOM
-                return Str::of($h)->lower()->trim()->replace([' ', '.'], '_')->__toString();
-            }, $rawHeader);
-
-            // canonical map untuk menangani variasi nama kolom
-            $canonicalMap = [
-                'heat_number'   => ['heat_number', 'heatno', 'heat_no', 'hn', 'heat'],
-                'item_code'     => ['item_code', 'code', 'itemcode', 'kode_item', 'kode'],
-                'item_name'     => ['item_name', 'name', 'itemname', 'nama_item'],
-                'weight_per_pc' => ['weight_per_pc', 'weight', 'w_per_pc', 'weight_per_piece', 'berat'],
-                'batch_qty'     => ['batch_qty', 'qty', 'quantity', 'jumlah'],
-                'cast_date'     => ['cast_date', 'castdate', 'tgl_cast', 'tanggal_cast', 'tanggal'],
-                'aisi'          => ['aisi', 'a_i_s_i'],
-                'size'          => ['size', 'ukuran'],
-                'line'          => ['line', 'production_line', 'l'],
-                'cust_name'     => ['cust_name', 'customer', 'cust', 'customer_name', 'nama_customer'],
-            ];
-
-            // buat map header index -> canonical key
-            $map = [];
-            foreach ($header as $i => $h) {
-                foreach ($canonicalMap as $canon => $aliases) {
-                    if (in_array($h, $aliases, true)) {
-                        $map[$canon] = $i;
-                        break;
-                    }
-                }
-            }
-
-            if (!isset($map['heat_number']) || !isset($map['item_code'])) {
-                throw new \RuntimeException('CSV harus memiliki kolom Heat Number dan Item Code.');
-            }
-
-            // baca seluruh baris
-            $rows = [];
-            while (($row = fgetcsv($handle)) !== false) {
-                if (count(array_filter($row, fn($c) => trim((string)$c) !== '')) === 0) {
-                    continue;
-                }
-                $rows[] = $row;
-            }
-
-            // proses di dalam transaction
             DB::beginTransaction();
+
             try {
                 $session = ImportSession::create([
                     'date'          => Carbon::parse($request->date)->toDateString(),
@@ -123,30 +81,35 @@ class BatchImportController extends Controller
                 $seen = [];
 
                 foreach ($rows as $row) {
-                    $hn = isset($map['heat_number']) ? trim((string)($row[$map['heat_number']] ?? '')) : '';
-                    $ic = isset($map['item_code']) ? trim((string)($row[$map['item_code']] ?? '')) : '';
+                    $hn = trim((string)($row['heat_number'] ?? ''));
+                    $ic = trim((string)($row['item_code'] ?? ''));
 
                     if ($hn === '' || $ic === '') {
+                        // Skip jika heat_number / item_code kosong
                         continue;
                     }
 
+                    // Skip duplikat di file (heat_number + item_code)
                     $key = $hn . '||' . $ic;
                     if (isset($seen[$key])) {
                         continue;
                     }
                     $seen[$key] = true;
 
-                    $itemName    = isset($map['item_name'])      ? trim((string)($row[$map['item_name']] ?? '')) : null;
-                    $weightPerPc = isset($map['weight_per_pc']) ? $this->toFloat($row[$map['weight_per_pc']] ?? null) : null;
-                    $batchQty    = isset($map['batch_qty'])     ? (int) ($row[$map['batch_qty']] ?? 0) : 0;
-                    $castRaw     = isset($map['cast_date'])     ? trim((string)($row[$map['cast_date']] ?? '')) : null;
-                    $castDate    = $castRaw ? $this->normalizeDate($castRaw, $session->date) : $session->date;
+                    $itemName    = $row['item_name'] ?? null;
+                    $weightPerPc = $this->toFloat($row['weight_per_pc'] ?? null);
+                    $batchQty    = isset($row['batch_qty']) ? (int) $row['batch_qty'] : 0;
+                    $castRaw     = $row['cast_date'] ?? null;
 
-                    // fields tambahan
-                    $aisi     = isset($map['aisi'])     ? trim((string)($row[$map['aisi']] ?? '')) : null;
-                    $size     = isset($map['size'])     ? trim((string)($row[$map['size']] ?? '')) : null;
-                    $line     = isset($map['line'])     ? trim((string)($row[$map['line']] ?? '')) : null;
-                    $custName = isset($map['cust_name'])? trim((string)($row[$map['cust_name']] ?? '')) : null;
+                    // Jika cast_date kosong / gagal parse -> fallback ke tanggal session
+                    $castDate = $castRaw
+                        ? $this->normalizeDate($castRaw, $session->date)
+                        : $session->date;
+
+                    $aisi     = $row['aisi'] ?? null;
+                    $size     = $row['size'] ?? null;
+                    $line     = $row['line'] ?? null;
+                    $custName = $row['cust_name'] ?? null;
 
                     $batchData = [
                         'item_name'         => $itemName !== '' ? $itemName : null,
@@ -160,24 +123,23 @@ class BatchImportController extends Controller
                         'cust_name'         => $custName ?: null,
                     ];
 
-                    // cari existing batch by heat_number + item_code
+                    // Cek existing batch berdasarkan heat_number + item_code
                     $existingBatch = Batch::where('heat_number', $hn)
                         ->where('item_code', $ic)
                         ->first();
 
                     if ($existingBatch) {
-                        // update fields (tidak override batch_code)
-                        $existingBatch->fill(array_merge(
-                            // hanya set field yang valid (include zeros)
+                        // Update field kecuali batch_code
+                        $existingBatch->fill(
                             array_filter($batchData, fn($v) => $v !== null || $v === 0)
-                        ));
+                        );
                         $existingBatch->import_session_id = $session->id;
                         $existingBatch->save();
                         $upd++;
                     } else {
-                        // buat batch baru; hitung seq dengan lock untuk mencegah race
+                        // Buat batch baru, sequence per session (lockForUpdate)
                         $seqCount = $session->batches()->lockForUpdate()->count();
-                        $seq = $seqCount + 1;
+                        $seq      = $seqCount + 1;
                         $batchCode = $this->generateBatchCodeForSession($session->date, $seq);
 
                         $createData = array_merge([
@@ -186,10 +148,24 @@ class BatchImportController extends Controller
                             'batch_code'  => $batchCode,
                         ], $batchData);
 
-                        Batch::create($createData);
+                        $batch = new Batch();
+                        $batch->batch_code        = $createData['batch_code'] ?? null;
+                        $batch->heat_number       = $createData['heat_number'] ?? null;
+                        $batch->item_code         = $createData['item_code'] ?? null;
+                        $batch->item_name         = $createData['item_name'] ?? null;
+                        $batch->weight_per_pc     = $createData['weight_per_pc'] ?? 0;
+                        $batch->batch_qty         = $createData['batch_qty'] ?? 0;
+                        $batch->cast_date         = $createData['cast_date'] ?? null;
+                        $batch->import_session_id = $createData['import_session_id'] ?? $session->id;
+                        $batch->aisi              = $createData['aisi'] ?? null;
+                        $batch->size              = $createData['size'] ?? null;
+                        $batch->line              = $createData['line'] ?? null;
+                        $batch->cust_name         = $createData['cust_name'] ?? null;
+                        $batch->save();
+
                         $ins++;
                     }
-                } // end foreach rows
+                }
 
                 DB::commit();
             } catch (\Throwable $e) {
@@ -197,17 +173,14 @@ class BatchImportController extends Controller
                 throw $e;
             }
         } catch (\Throwable $e) {
-            if (is_resource($handle)) {
-                fclose($handle);
-            }
-            return redirect()->back()->with('error', 'Terjadi error saat mengimpor CSV: ' . $e->getMessage());
-        } finally {
-            if (is_resource($handle)) {
-                fclose($handle);
-            }
+            return redirect()->back()->with(
+                'error',
+                'Terjadi error saat mengimpor file: ' . $e->getMessage()
+            );
         }
 
-        return redirect()->route('imports.index')
+        return redirect()
+            ->route('imports.index')
             ->with('status', "Import selesai. Insert: {$ins}, Update: {$upd}");
     }
 
@@ -216,7 +189,9 @@ class BatchImportController extends Controller
      */
     public function show(ImportSession $importSession)
     {
-        $batches = $importSession->batches()->orderBy('heat_number')->get();
+        $batches = $importSession->batches()
+            ->orderBy('heat_number')
+            ->get();
 
         return view('imports.show', compact('importSession', 'batches'));
     }
@@ -226,7 +201,9 @@ class BatchImportController extends Controller
      */
     public function edit(ImportSession $importSession)
     {
-        $batches = $importSession->batches()->orderBy('heat_number')->get();
+        $batches = $importSession->batches()
+            ->orderBy('heat_number')
+            ->get();
 
         return view('imports.edit', compact('importSession', 'batches'));
     }
@@ -244,9 +221,9 @@ class BatchImportController extends Controller
         }
 
         DB::beginTransaction();
+
         try {
             foreach ($data as $id => $row) {
-                // cast to array to be safe
                 $row = (array) $row;
 
                 $rowValidator = Validator::make($row, [
@@ -263,7 +240,7 @@ class BatchImportController extends Controller
                 ]);
 
                 if ($rowValidator->fails()) {
-                    // skip invalid row (alternatif: collect errors)
+                    // Bisa dikumpulkan error per-row kalau mau
                     continue;
                 }
 
@@ -276,24 +253,26 @@ class BatchImportController extends Controller
                 }
 
                 $batch->heat_number = $row['heat_number'];
-                $batch->item_code = $row['item_code'];
-                $batch->item_name = $row['item_name'] ?? $batch->item_name;
-                $batch->weight_per_pc = array_key_exists('weight_per_pc', $row) && $row['weight_per_pc'] !== '' 
-                    ? (float)$row['weight_per_pc'] 
+                $batch->item_code   = $row['item_code'];
+                $batch->item_name   = $row['item_name'] ?? $batch->item_name;
+
+                $batch->weight_per_pc = array_key_exists('weight_per_pc', $row) && $row['weight_per_pc'] !== ''
+                    ? (float) $row['weight_per_pc']
                     : $batch->weight_per_pc;
-                $batch->batch_qty = array_key_exists('batch_qty', $row) && $row['batch_qty'] !== '' 
-                    ? (int)$row['batch_qty'] 
+
+                $batch->batch_qty = array_key_exists('batch_qty', $row) && $row['batch_qty'] !== ''
+                    ? (int) $row['batch_qty']
                     : $batch->batch_qty;
 
                 if (!empty($row['cast_date'])) {
                     try {
                         $batch->cast_date = Carbon::parse($row['cast_date'])->toDateString();
                     } catch (\Throwable $e) {
-                        // ignore invalid date
+                        // abaikan invalid date
                     }
                 }
 
-                // fields tambahan (jaga jika key ada, boleh kosong untuk clear)
+                // Field tambahan, boleh kosong untuk clear
                 if (array_key_exists('aisi', $row)) {
                     $batch->aisi = $row['aisi'] === '' ? null : $row['aisi'];
                 }
@@ -337,11 +316,15 @@ class BatchImportController extends Controller
      */
     protected function generateBatchCodeForSession(string $sessionDate, int $seq): string
     {
-        $d = Carbon::parse($sessionDate)->format('Ymd');
+        $d   = Carbon::parse($sessionDate)->format('Ymd');
         $idx = str_pad($seq, 2, '0', STR_PAD_LEFT);
+
         return "CR-{$d}-{$idx}";
     }
 
+    /**
+     * Normalize date, fallback jika gagal parse
+     */
     protected function normalizeDate($value, $fallback)
     {
         try {
@@ -351,10 +334,233 @@ class BatchImportController extends Controller
         }
     }
 
+    /**
+     * Konversi numeric string (pakai koma/titik) menjadi float
+     */
     protected function toFloat($value)
     {
-        if ($value === null || $value === '') return null;
-        $clean = str_replace([' ', ','], ['', '.'], trim((string)$value));
-        return is_numeric($clean) ? (float)$clean : null;
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        $clean = str_replace([' ', ','], ['', '.'], trim((string) $value));
+
+        return is_numeric($clean) ? (float) $clean : null;
+    }
+
+    /**
+     * Deteksi extension dan delegasikan ke parser yang sesuai
+     *
+     * @param \Illuminate\Http\UploadedFile $file
+     * @return array<int, array<string, mixed>>
+     */
+    protected function parseUploadedFile($file): array
+    {
+        $extension = strtolower($file->getClientOriginalExtension());
+
+        if (in_array($extension, ['xlsx', 'xls'], true)) {
+            return $this->parseXlsxToRows($file);
+        }
+
+        // fallback CSV/TXT (mekanisme lama)
+        return $this->parseCsvToRows($file);
+    }
+
+    /**
+     * Parse XLSX/XLS via Laravel Excel
+     *
+     * Mengandalkan BatchXlsxImport untuk mengembalikan array baris dengan key canonical:
+     * heat_number, item_code, item_name, weight_per_pc, batch_qty, cast_date, aisi, size, line, cust_name
+     */
+    protected function parseXlsxToRows($file): array
+    {
+        // Sheet pertama
+        $sheets = Excel::toArray(new BatchXlsxImport, $file);
+
+        $rows = $sheets[0] ?? [];
+
+        // Bersihkan baris kosong total
+        $rows = array_filter($rows, function ($row) {
+            if (!is_array($row)) {
+                return false;
+            }
+
+            foreach ($row as $value) {
+                if (trim((string) $value) !== '') {
+                    return true;
+                }
+            }
+
+            return false;
+        });
+
+        return array_values($rows);
+    }
+
+    /**
+     * Parse CSV/TXT menggunakan mekanisme lama (stream + auto-merge baris)
+     *
+     * Menghasilkan array baris asosiatif dengan key canonical sama seperti parseXlsxToRows()
+     */
+    protected function parseCsvToRows($file): array
+    {
+        $path   = $file->getRealPath();
+        $handle = fopen($path, 'r');
+
+        if ($handle === false) {
+            throw new \RuntimeException('Gagal membuka file CSV.');
+        }
+
+        try {
+            // --- HEADER HANDLING (robust) ---
+            $rawHeader = null;
+
+            while (!feof($handle)) {
+                $line = fgets($handle);
+                if ($line === false) {
+                    break;
+                }
+
+                $cells = str_getcsv($line, ',', '"', '\\');
+
+                // skip baris kosong
+                if (is_array($cells) && count(array_filter($cells, fn($c) => trim((string) $c) !== '')) === 0) {
+                    continue;
+                }
+
+                $rawHeader = $cells;
+                break;
+            }
+
+            if ($rawHeader === null) {
+                throw new \RuntimeException('File CSV kosong atau rusak (header tidak ditemukan).');
+            }
+
+            // normalisasi header (hapus BOM + lowercase + spasi/dot -> underscore)
+            $header = array_map(function ($h) {
+                $h = (string) $h;
+                $h = preg_replace('/^\x{FEFF}/u', '', $h); // remove BOM
+                return Str::of($h)->lower()->trim()->replace([' ', '.'], '_')->__toString();
+            }, $rawHeader);
+
+            /**
+             * Peta nama kolom variatif ke nama canonical
+             */
+            $canonicalMap = [
+                'heat_number'   => ['heat_number', 'heatno', 'heat_no', 'hn', 'heat'],
+                'item_code'     => ['item_code', 'code', 'itemcode', 'kode_item', 'kode'],
+                'item_name'     => ['item_name', 'name', 'itemname', 'nama_item'],
+                'weight_per_pc' => ['weight_per_pc', 'weight', 'w_per_pc', 'weight_per_piece', 'berat'],
+                'batch_qty'     => ['batch_qty', 'qty', 'quantity', 'jumlah'],
+                'cast_date'     => ['cast_date', 'castdate', 'tgl_cast', 'tanggal_cast', 'tanggal'],
+                'aisi'          => ['aisi', 'a_i_s_i', 'a.i.s.i'],
+                'size'          => ['size', 'ukuran'],
+                'line'          => ['line', 'production_line', 'l'],
+                'cust_name'     => ['cust_name', 'customer', 'cust', 'customer_name', 'nama_customer'],
+            ];
+
+            // buat map index header -> canonical key
+            $map = [];
+            foreach ($header as $i => $h) {
+                foreach ($canonicalMap as $canon => $aliases) {
+                    if (in_array($h, $aliases, true)) {
+                        $map[$canon] = $i;
+                        break;
+                    }
+                }
+            }
+
+            if (!isset($map['heat_number']) || !isset($map['item_code'])) {
+                throw new \RuntimeException('CSV harus memiliki kolom Heat Number dan Item Code.');
+            }
+
+            $headerCount = count($header);
+
+            // --- READ ROWS ROBUSTLY ---
+            $rawRows = [];
+            $badRows = [];
+
+            while (!feof($handle)) {
+                $raw = fgets($handle);
+                if ($raw === false) {
+                    break;
+                }
+
+                // cek apakah baris kosong
+                $peekCells = str_getcsv($raw, ',', '"', '\\');
+                if (is_array($peekCells) && count(array_filter($peekCells, fn($c) => trim((string) $c) !== '')) === 0) {
+                    continue;
+                }
+
+                $combined = $raw;
+                $cells    = str_getcsv($combined, ',', '"', '\\');
+                $attempts = 0;
+
+                // coba gabung max 10 baris jika kolom kurang dari header
+                while (count($cells) < $headerCount && !feof($handle) && $attempts < 10) {
+                    $nextLine = fgets($handle);
+                    if ($nextLine === false) {
+                        break;
+                    }
+
+                    $combined .= "\n" . $nextLine;
+                    $cells     = str_getcsv($combined, ',', '"', '\\');
+                    $attempts++;
+                }
+
+                // jika masih kurang kolom -> tandai sebagai bad row
+                if (count($cells) < $headerCount) {
+                    $badRows[] = [
+                        'line' => 'approx:' . (count($rawRows) + 2),
+                        'cols' => $cells,
+                        'raw'  => $combined,
+                    ];
+                    continue;
+                }
+
+                // trim setiap cell
+                $cells    = array_map(fn($c) => is_null($c) ? '' : trim((string) $c), $cells);
+                $rawRows[] = $cells;
+            }
+
+            if (count($badRows) > 0) {
+                \Log::warning(
+                    'Import CSV has rows with unexpected column count (auto-merge failed)',
+                    ['bad_rows_sample' => array_slice($badRows, 0, 5)]
+                );
+
+                $firstBad = $badRows[0];
+                throw new \RuntimeException(
+                    'Beberapa baris CSV memiliki jumlah kolom tidak konsisten (contoh baris: ' .
+                    $firstBad['line'] .
+                    '). Periksa tanda petik ganda (") di file CSV atau perbaiki CSV sebelum meng-upload. ' .
+                    'Lihat storage/logs/laravel.log untuk detail.'
+                );
+            }
+
+            // Konversi raw rows (numeric index) menjadi rows asosiatif dengan key canonical
+            $rows = [];
+
+            foreach ($rawRows as $cells) {
+                $rows[] = [
+                    'heat_number'   => $cells[$map['heat_number']] ?? null,
+                    'item_code'     => $cells[$map['item_code']] ?? null,
+                    'item_name'     => isset($map['item_name']) ? ($cells[$map['item_name']] ?? null) : null,
+                    'weight_per_pc' => isset($map['weight_per_pc']) ? ($cells[$map['weight_per_pc']] ?? null) : null,
+                    'batch_qty'     => isset($map['batch_qty']) ? ($cells[$map['batch_qty']] ?? null) : null,
+                    'cast_date'     => isset($map['cast_date']) ? ($cells[$map['cast_date']] ?? null) : null,
+                    'aisi'          => isset($map['aisi']) ? ($cells[$map['aisi']] ?? null) : null,
+                    'size'          => isset($map['size']) ? ($cells[$map['size']] ?? null) : null,
+                    'line'          => isset($map['line']) ? ($cells[$map['line']] ?? null) : null,
+                    'cust_name'     => isset($map['cust_name']) ? ($cells[$map['cust_name']] ?? null) : null,
+                ];
+            }
+
+            return $rows;
+        } finally {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+        }
     }
 }
