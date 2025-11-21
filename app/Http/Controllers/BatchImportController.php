@@ -15,6 +15,9 @@ use Carbon\Carbon;
 
 class BatchImportController extends Controller
 {
+    /**
+     * List import sessions (aktif).
+     */
     public function index()
     {
         $sessions = ImportSession::withCount('batches')
@@ -24,6 +27,9 @@ class BatchImportController extends Controller
         return view('imports.index', compact('sessions'));
     }
 
+    /**
+     * Form upload import.
+     */
     public function create()
     {
         $departments = Department::where('is_active', 1)
@@ -50,7 +56,7 @@ class BatchImportController extends Controller
         }
 
         $file = $request->file('file');
-        if (!$file || !$file->isValid()) {
+        if (! $file || ! $file->isValid()) {
             return redirect()->back()->with('error', 'File tidak valid.');
         }
 
@@ -58,10 +64,7 @@ class BatchImportController extends Controller
         $upd = 0;
 
         try {
-            // Baca file (XLSX / XLS / CSV / TXT) menjadi array baris ter-normalisasi
-            // Setiap baris berupa array asosiatif dengan key canonical:
-            // heat_number, item_code, item_name, weight_per_pc, batch_qty,
-            // cast_date, aisi, size, line, cust_name
+            // Baca file menjadi array baris canonical
             $rows = $this->parseUploadedFile($file);
 
             if (empty($rows)) {
@@ -81,11 +84,11 @@ class BatchImportController extends Controller
                 $seen = [];
 
                 foreach ($rows as $row) {
-                    $hn = trim((string)($row['heat_number'] ?? ''));
-                    $ic = trim((string)($row['item_code'] ?? ''));
+                    $hn = trim((string) ($row['heat_number'] ?? ''));
+                    $ic = trim((string) ($row['item_code'] ?? ''));
 
+                    // Skip jika heat_number / item_code kosong
                     if ($hn === '' || $ic === '') {
-                        // Skip jika heat_number / item_code kosong
                         continue;
                     }
 
@@ -137,9 +140,9 @@ class BatchImportController extends Controller
                         $existingBatch->save();
                         $upd++;
                     } else {
-                        // Buat batch baru, sequence per session (lockForUpdate)
-                        $seqCount = $session->batches()->lockForUpdate()->count();
-                        $seq      = $seqCount + 1;
+                        // Buat batch baru, sequence per session
+                        $seqCount  = $session->batches()->lockForUpdate()->count();
+                        $seq       = $seqCount + 1;
                         $batchCode = $this->generateBatchCodeForSession($session->date, $seq);
 
                         $createData = array_merge([
@@ -148,19 +151,19 @@ class BatchImportController extends Controller
                             'batch_code'  => $batchCode,
                         ], $batchData);
 
-                        $batch = new Batch();
-                        $batch->batch_code        = $createData['batch_code'] ?? null;
-                        $batch->heat_number       = $createData['heat_number'] ?? null;
-                        $batch->item_code         = $createData['item_code'] ?? null;
-                        $batch->item_name         = $createData['item_name'] ?? null;
-                        $batch->weight_per_pc     = $createData['weight_per_pc'] ?? 0;
-                        $batch->batch_qty         = $createData['batch_qty'] ?? 0;
-                        $batch->cast_date         = $createData['cast_date'] ?? null;
-                        $batch->import_session_id = $createData['import_session_id'] ?? $session->id;
-                        $batch->aisi              = $createData['aisi'] ?? null;
-                        $batch->size              = $createData['size'] ?? null;
-                        $batch->line              = $createData['line'] ?? null;
-                        $batch->cust_name         = $createData['cust_name'] ?? null;
+                        $batch                      = new Batch();
+                        $batch->batch_code          = $createData['batch_code'] ?? null;
+                        $batch->heat_number         = $createData['heat_number'] ?? null;
+                        $batch->item_code           = $createData['item_code'] ?? null;
+                        $batch->item_name           = $createData['item_name'] ?? null;
+                        $batch->weight_per_pc       = $createData['weight_per_pc'] ?? 0;
+                        $batch->batch_qty           = $createData['batch_qty'] ?? 0;
+                        $batch->cast_date           = $createData['cast_date'] ?? null;
+                        $batch->import_session_id   = $createData['import_session_id'] ?? $session->id;
+                        $batch->aisi                = $createData['aisi'] ?? null;
+                        $batch->size                = $createData['size'] ?? null;
+                        $batch->line                = $createData['line'] ?? null;
+                        $batch->cust_name           = $createData['cust_name'] ?? null;
                         $batch->save();
 
                         $ins++;
@@ -173,10 +176,9 @@ class BatchImportController extends Controller
                 throw $e;
             }
         } catch (\Throwable $e) {
-            return redirect()->back()->with(
-                'error',
-                'Terjadi error saat mengimpor file: ' . $e->getMessage()
-            );
+            return redirect()
+                ->back()
+                ->with('error', 'Terjadi error saat mengimpor file: ' . $e->getMessage());
         }
 
         return redirect()
@@ -185,7 +187,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Show session detail
+     * Tampilkan detail satu import session.
      */
     public function show(ImportSession $importSession)
     {
@@ -197,7 +199,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Edit view -> menampilkan editable rows
+     * Form edit batch hasil import.
      */
     public function edit(ImportSession $importSession)
     {
@@ -209,14 +211,14 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Update batches dari form edit
-     * Expect: $request->input('batches') => associative array [id => [...fields...]]
+     * Update batches dari form edit.
+     * Expect: $request->input('batches') => [id => [...fields...]]
      */
     public function update(Request $request, ImportSession $importSession)
     {
         $data = $request->input('batches', []);
 
-        if (!is_array($data) || count($data) === 0) {
+        if (! is_array($data) || count($data) === 0) {
             return back()->with('error', 'Tidak ada batch yang dikirim untuk diperbarui.');
         }
 
@@ -240,7 +242,7 @@ class BatchImportController extends Controller
                 ]);
 
                 if ($rowValidator->fails()) {
-                    // Bisa dikumpulkan error per-row kalau mau
+                    // Bisa disimpan untuk feedback per-row jika diperlukan
                     continue;
                 }
 
@@ -248,7 +250,7 @@ class BatchImportController extends Controller
                     ->where('import_session_id', $importSession->id)
                     ->first();
 
-                if (!$batch) {
+                if (! $batch) {
                     continue;
                 }
 
@@ -264,7 +266,7 @@ class BatchImportController extends Controller
                     ? (int) $row['batch_qty']
                     : $batch->batch_qty;
 
-                if (!empty($row['cast_date'])) {
+                if (! empty($row['cast_date'])) {
                     try {
                         $batch->cast_date = Carbon::parse($row['cast_date'])->toDateString();
                     } catch (\Throwable $e) {
@@ -292,6 +294,7 @@ class BatchImportController extends Controller
             DB::commit();
         } catch (\Throwable $e) {
             DB::rollBack();
+
             return back()->with('error', 'Terjadi kesalahan saat memperbarui batch: ' . $e->getMessage());
         }
 
@@ -299,16 +302,65 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Delete session + batches (soft delete jika model support)
+     * Soft delete session + batches.
      */
     public function destroy(ImportSession $importSession)
     {
         DB::transaction(function () use ($importSession) {
+            // soft delete batches dulu, lalu session
             $importSession->batches()->delete();
             $importSession->delete();
         });
 
         return back()->with('status', 'Import session dihapus.');
+    }
+
+    /**
+     * Recycle Bin: list ImportSession yang sudah di-soft-delete.
+     */
+    public function recycle()
+    {
+        $deleted = ImportSession::onlyTrashed()
+            ->withCount([
+                // hitung juga batches yang ter-soft delete
+                'batches' => fn($q) => $q->withTrashed(),
+            ])
+            ->orderByDesc('deleted_at')
+            ->get();
+
+        return view('imports.recycle', compact('deleted'));
+    }
+
+    /**
+     * Restore ImportSession + batches yang terhapus (soft delete).
+     */
+    public function restore($id)
+    {
+        $session = ImportSession::onlyTrashed()->findOrFail($id);
+
+        DB::transaction(function () use ($session) {
+            $session->restore();
+            // restore semua batch yang terkait (yang ter-soft delete)
+            $session->batches()->withTrashed()->restore();
+        });
+
+        return back()->with('success', 'Import session berhasil dikembalikan.');
+    }
+
+    /**
+     * Hapus permanen ImportSession + batches (force delete).
+     */
+    public function forceDelete($id)
+    {
+        $session = ImportSession::onlyTrashed()->findOrFail($id);
+
+        DB::transaction(function () use ($session) {
+            // hapus permanen semua batch yang terkait (termasuk yang ter-soft delete)
+            $session->batches()->withTrashed()->forceDelete();
+            $session->forceDelete();
+        });
+
+        return back()->with('success', 'Import session dihapus permanen.');
     }
 
     /**
@@ -323,7 +375,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Normalize date, fallback jika gagal parse
+     * Normalize date, fallback jika gagal parse.
      */
     protected function normalizeDate($value, $fallback)
     {
@@ -335,7 +387,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Konversi numeric string (pakai koma/titik) menjadi float
+     * Konversi numeric string (pakai koma/titik) menjadi float.
      */
     protected function toFloat($value)
     {
@@ -349,7 +401,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Deteksi extension dan delegasikan ke parser yang sesuai
+     * Deteksi extension dan delegasikan ke parser yang sesuai.
      *
      * @param \Illuminate\Http\UploadedFile $file
      * @return array<int, array<string, mixed>>
@@ -362,26 +414,27 @@ class BatchImportController extends Controller
             return $this->parseXlsxToRows($file);
         }
 
-        // fallback CSV/TXT (mekanisme lama)
+        // fallback CSV/TXT
         return $this->parseCsvToRows($file);
     }
 
     /**
-     * Parse XLSX/XLS via Laravel Excel
+     * Parse XLSX/XLS via Laravel Excel.
      *
-     * Mengandalkan BatchXlsxImport untuk mengembalikan array baris dengan key canonical:
-     * heat_number, item_code, item_name, weight_per_pc, batch_qty, cast_date, aisi, size, line, cust_name
+     * Mengandalkan BatchXlsxImport untuk mengembalikan array baris
+     * dengan key canonical:
+     * heat_number, item_code, item_name, weight_per_pc, batch_qty,
+     * cast_date, aisi, size, line, cust_name
      */
     protected function parseXlsxToRows($file): array
     {
-        // Sheet pertama
         $sheets = Excel::toArray(new BatchXlsxImport, $file);
 
         $rows = $sheets[0] ?? [];
 
-        // Bersihkan baris kosong total
+        // Buang baris kosong total
         $rows = array_filter($rows, function ($row) {
-            if (!is_array($row)) {
+            if (! is_array($row)) {
                 return false;
             }
 
@@ -398,9 +451,7 @@ class BatchImportController extends Controller
     }
 
     /**
-     * Parse CSV/TXT menggunakan mekanisme lama (stream + auto-merge baris)
-     *
-     * Menghasilkan array baris asosiatif dengan key canonical sama seperti parseXlsxToRows()
+     * Parse CSV/TXT -> array baris canonical (heat_number, item_code, dst).
      */
     protected function parseCsvToRows($file): array
     {
@@ -412,10 +463,10 @@ class BatchImportController extends Controller
         }
 
         try {
-            // --- HEADER HANDLING (robust) ---
+            // --- HEADER HANDLING ---
             $rawHeader = null;
 
-            while (!feof($handle)) {
+            while (! feof($handle)) {
                 $line = fgets($handle);
                 if ($line === false) {
                     break;
@@ -436,16 +487,14 @@ class BatchImportController extends Controller
                 throw new \RuntimeException('File CSV kosong atau rusak (header tidak ditemukan).');
             }
 
-            // normalisasi header (hapus BOM + lowercase + spasi/dot -> underscore)
+            // normalisasi header
             $header = array_map(function ($h) {
                 $h = (string) $h;
                 $h = preg_replace('/^\x{FEFF}/u', '', $h); // remove BOM
                 return Str::of($h)->lower()->trim()->replace([' ', '.'], '_')->__toString();
             }, $rawHeader);
 
-            /**
-             * Peta nama kolom variatif ke nama canonical
-             */
+            // peta nama kolom variatif ke canonical
             $canonicalMap = [
                 'heat_number'   => ['heat_number', 'heatno', 'heat_no', 'hn', 'heat'],
                 'item_code'     => ['item_code', 'code', 'itemcode', 'kode_item', 'kode'],
@@ -459,7 +508,7 @@ class BatchImportController extends Controller
                 'cust_name'     => ['cust_name', 'customer', 'cust', 'customer_name', 'nama_customer'],
             ];
 
-            // buat map index header -> canonical key
+            // map index header -> canonical key
             $map = [];
             foreach ($header as $i => $h) {
                 foreach ($canonicalMap as $canon => $aliases) {
@@ -470,23 +519,22 @@ class BatchImportController extends Controller
                 }
             }
 
-            if (!isset($map['heat_number']) || !isset($map['item_code'])) {
+            if (! isset($map['heat_number']) || ! isset($map['item_code'])) {
                 throw new \RuntimeException('CSV harus memiliki kolom Heat Number dan Item Code.');
             }
 
             $headerCount = count($header);
 
-            // --- READ ROWS ROBUSTLY ---
+            // --- READ ROWS ---
             $rawRows = [];
             $badRows = [];
 
-            while (!feof($handle)) {
+            while (! feof($handle)) {
                 $raw = fgets($handle);
                 if ($raw === false) {
                     break;
                 }
 
-                // cek apakah baris kosong
                 $peekCells = str_getcsv($raw, ',', '"', '\\');
                 if (is_array($peekCells) && count(array_filter($peekCells, fn($c) => trim((string) $c) !== '')) === 0) {
                     continue;
@@ -496,8 +544,8 @@ class BatchImportController extends Controller
                 $cells    = str_getcsv($combined, ',', '"', '\\');
                 $attempts = 0;
 
-                // coba gabung max 10 baris jika kolom kurang dari header
-                while (count($cells) < $headerCount && !feof($handle) && $attempts < 10) {
+                // coba gabung max 10 baris jika kolom kurang
+                while (count($cells) < $headerCount && ! feof($handle) && $attempts < 10) {
                     $nextLine = fgets($handle);
                     if ($nextLine === false) {
                         break;
@@ -508,7 +556,6 @@ class BatchImportController extends Controller
                     $attempts++;
                 }
 
-                // jika masih kurang kolom -> tandai sebagai bad row
                 if (count($cells) < $headerCount) {
                     $badRows[] = [
                         'line' => 'approx:' . (count($rawRows) + 2),
@@ -518,8 +565,7 @@ class BatchImportController extends Controller
                     continue;
                 }
 
-                // trim setiap cell
-                $cells    = array_map(fn($c) => is_null($c) ? '' : trim((string) $c), $cells);
+                $cells     = array_map(fn($c) => is_null($c) ? '' : trim((string) $c), $cells);
                 $rawRows[] = $cells;
             }
 
@@ -530,6 +576,7 @@ class BatchImportController extends Controller
                 );
 
                 $firstBad = $badRows[0];
+
                 throw new \RuntimeException(
                     'Beberapa baris CSV memiliki jumlah kolom tidak konsisten (contoh baris: ' .
                     $firstBad['line'] .
@@ -538,7 +585,7 @@ class BatchImportController extends Controller
                 );
             }
 
-            // Konversi raw rows (numeric index) menjadi rows asosiatif dengan key canonical
+            // Konversi ke rows asosiatif (canonical)
             $rows = [];
 
             foreach ($rawRows as $cells) {

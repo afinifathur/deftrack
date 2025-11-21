@@ -13,8 +13,6 @@ class Batch extends Model
 
     /**
      * Kolom yang boleh di-mass-assign.
-     *
-     * @var array
      */
     protected $fillable = [
         'batch_code',
@@ -32,44 +30,44 @@ class Batch extends Model
     ];
 
     /**
-     * Casting
-     *
-     * @var array
+     * Casting atribut.
      */
     protected $casts = [
         'cast_date'         => 'date',
         'weight_per_pc'     => 'decimal:3',
         'batch_qty'         => 'integer',
         'import_session_id' => 'integer',
+        'deleted_at'        => 'datetime',
     ];
 
     /**
-     * Boot model untuk generate batch_code saat creating.
-     * (DIBIARKAN seperti kode awal, tanpa type hint return)
+     * Boot model: auto-generate batch_code saat creating,
+     * kecuali sudah diset manual oleh caller.
      */
-    protected static function booted()
+    protected static function booted(): void
     {
         static::creating(function (Batch $batch) {
-            // Jika batch_code sudah diset oleh caller, jangan override
-            if (!empty($batch->batch_code)) {
+            // Jika batch_code sudah diset, jangan di-override
+            if (! empty($batch->batch_code)) {
                 return;
             }
 
-            // Jika ada import_session_id, gunakan sequence per session (lebih deterministik untuk import)
-            if (!empty($batch->import_session_id)) {
-                $batch->batch_code = self::generateBatchCodeForSession(
+            // Jika berasal dari import_session: gunakan generator per session
+            if (! empty($batch->import_session_id)) {
+                $batch->batch_code = static::generateBatchCodeForSession(
                     (int) $batch->import_session_id,
                     $batch->cast_date ? $batch->cast_date->toDateString() : null
                 );
+
                 return;
             }
 
-            // Fallback: generate berdasarkan cast_date (tanggal)
+            // Fallback: generate berdasarkan cast_date (atau tanggal hari ini)
             $date = $batch->cast_date
                 ? $batch->cast_date->toDateString()
                 : Carbon::now()->toDateString();
 
-            $batch->batch_code = self::generateBatchCodeByDate($date);
+            $batch->batch_code = static::generateBatchCodeByDate($date);
         });
     }
 
@@ -80,26 +78,20 @@ class Batch extends Model
     /**
      * Generate kode per import_session: PREFIX-YYYYMMDD-SS
      * Menggunakan transaction + lockForUpdate untuk mengurangi race condition.
-     *
-     * @param int         $importSessionId
-     * @param string|null $castDate         Format yang diterima: anything parsable oleh Carbon / null
-     * @param string      $prefix
-     *
-     * @return string
      */
     public static function generateBatchCodeForSession(
         int $importSessionId,
-        $castDate = null,
+        ?string $castDate = null,
         string $prefix = 'CR'
     ): string {
         return DB::transaction(function () use ($importSessionId, $castDate, $prefix) {
-            // Ambil tanggal dari parameter dulu; jika null, coba ambil session_date dari import_sessions
+            // Tanggal: pakai parameter kalau ada, kalau tidak ambil dari import_sessions.date
             if ($castDate) {
                 $dateCarbon = Carbon::parse($castDate);
             } else {
                 $sessionDate = DB::table('import_sessions')
                     ->where('id', $importSessionId)
-                    ->value('session_date');
+                    ->value('date'); // kolom di ImportSession
 
                 $dateCarbon = $sessionDate
                     ? Carbon::parse($sessionDate)
@@ -108,7 +100,7 @@ class Batch extends Model
 
             $dateStr = $dateCarbon->format('Ymd');
 
-            // Hitung jumlah baris yang sudah punya batch_code di session tersebut, dengan lock untuk menghindari race.
+            // Hitung jumlah batch yang sudah punya batch_code di session ini
             $count = DB::table('batches')
                 ->where('import_session_id', $importSessionId)
                 ->whereNotNull('batch_code')
@@ -125,11 +117,6 @@ class Batch extends Model
     /**
      * Generate kode berdasarkan cast_date: PREFIX-YYYYMMDD-SS
      * Menggunakan transaction + lockForUpdate untuk mengurangi race condition.
-     *
-     * @param string $date   Format: anything parsable oleh Carbon
-     * @param string $prefix
-     *
-     * @return string
      */
     public static function generateBatchCodeByDate(string $date, string $prefix = 'CR'): string
     {
@@ -152,20 +139,15 @@ class Batch extends Model
     }
 
     /**
-     * Backfill helper: isi batch_code untuk semua batch pada import_session yang masih kosong.
-     * Berguna untuk import lama/retrofit. Method ini melakukan update dalam transaction.
-     *
-     * @param int    $importSessionId
-     * @param string $prefix
-     *
-     * @return int  Jumlah record yang di-update
+     * Backfill helper: isi batch_code untuk semua batch pada import_session
+     * yang masih null. Berguna untuk data lama.
      */
     public static function fillMissingBatchCodesForImportSession(
         int $importSessionId,
         string $prefix = 'CR'
     ): int {
         return DB::transaction(function () use ($importSessionId, $prefix) {
-            // Ambil rows yang batch_code null, urutkan berdasarkan id (atau created_at) sehingga deterministic
+            // Ambil rows yang batch_code null, urut berdasarkan id
             $rows = DB::table('batches')
                 ->where('import_session_id', $importSessionId)
                 ->whereNull('batch_code')
@@ -180,7 +162,7 @@ class Batch extends Model
                     ? Carbon::parse($row->cast_date)->toDateString()
                     : Carbon::now()->toDateString();
 
-                // Hitung berapa sudah ada (termasuk yang baru saja diisi dalam loop ini) untuk session tersebut
+                // Hitung berapa yang sudah punya kode untuk session ini
                 $count = DB::table('batches')
                     ->where('import_session_id', $importSessionId)
                     ->whereNotNull('batch_code')
@@ -190,7 +172,8 @@ class Batch extends Model
                 $next    = $count + 1;
                 $seq     = str_pad((string) $next, 2, '0', STR_PAD_LEFT);
                 $dateStr = Carbon::parse($castDate)->format('Ymd');
-                $code    = sprintf('%s-%s-%s', $prefix, $dateStr, $seq);
+
+                $code = sprintf('%s-%s-%s', $prefix, $dateStr, $seq);
 
                 DB::table('batches')
                     ->where('id', $row->id)
@@ -212,7 +195,7 @@ class Batch extends Model
 
     public function importSession()
     {
-        return $this->belongsTo(ImportSession::class);
+        return $this->belongsTo(ImportSession::class, 'import_session_id');
     }
 
     public function defectLines()
