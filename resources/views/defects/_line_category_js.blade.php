@@ -1,110 +1,255 @@
 <script>
-(() => {
-  // jika project kamu berada di subfolder (index.php in URL), set basePrefix sesuai
-  // contoh untuk env dev mu: '/deftrack/public/index.php'
-  const apiPrefix = (() => {
-    // try to detect base automatically:
-    const base = window.location.pathname.split('/index.php')[0] || '';
-    return base + '/index.php';
-  })();
+// FILE: resources/views/defects/_line_category_js.blade.php
+// Dropdown kategori per departemen (dipakai di defects/create).
 
-  // helper fetch categories for departmentId -> returns array
-  async function fetchCategoriesForDepartment(deptId) {
-    if (!deptId) return [];
-    try {
-      const url = `${apiPrefix}/api/departments/${encodeURIComponent(deptId)}/categories`;
-      const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
-      if (!res.ok) {
-        console.warn('fetch categories failed', res.status);
-        return [];
-      }
-      const j = await res.json();
-      return Array.isArray(j.data) ? j.data : [];
-    } catch (e) {
-      console.error('fetchCategoriesForDepartment error', e);
-      return [];
+(function () {
+    'use strict';
+
+    // Cache kategori untuk departemen aktif
+    let currentDeptId = null;
+    let currentCategoryOptions = '<option value="">— Pilih Kategori —</option>';
+
+    // Base URL dari Laravel, dinormalisasi supaya tidak dobel /index.php
+    const APP_BASE_URL = @json(url('/'));
+
+    /**
+     * Escape HTML sederhana untuk nama kategori.
+     */
+    function escapeHtml(s) {
+        if (s == null) return '';
+        return String(s).replace(/[&<>"']/g, function (m) {
+            return {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[m];
+        });
     }
-  }
 
-  // render options html from category array
-  function renderCategoryOptions(categories, includePlaceholder = true) {
-    const placeholder = '<option value="">— Pilih Kategori —</option>';
-    const opts = categories.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
-    return (includePlaceholder ? placeholder : '') + opts;
-  }
+    /**
+     * Bangun URL API kategori berdasarkan deptId.
+     * Hasil: {base}/index.php/api/departments/{deptId}/categories
+     * tanpa duplikasi index.php.
+     */
+    function buildCategoriesUrl(deptId) {
+        if (!deptId) return null;
 
-  // small escape for safety
-  function escapeHtml(str) {
-    if (str == null) return '';
-    return String(str).replace(/[&<>"'`=\/]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','/':'&#x2F;','`':'&#x60;','=':'&#x3D;'})[s]);
-  }
+        let base = String(APP_BASE_URL || '').trim();
 
-  // fill all .category selects on page with categories list
-  function fillAllCategorySelects(categories) {
-    const html = renderCategoryOptions(categories);
-    document.querySelectorAll('.category').forEach(sel => {
-      sel.innerHTML = html;
-    });
-  }
+        // Hapus trailing slash
+        base = base.replace(/\/+$/, '');
 
-  // fill a single row's category select (rowEl can be row container or element)
-  function fillCategoriesOnRow(rowEl, categories) {
-    if (!rowEl) return;
-    const sel = rowEl.querySelector('.category');
-    if (!sel) return;
-    sel.innerHTML = renderCategoryOptions(categories);
-  }
+        // Hapus trailing /index.php (kalau ada)
+        base = base.replace(/\/index\.php$/i, '');
 
-  // when department changes: fetch categories and apply to all rows
-  async function onDepartmentChange(ev) {
-    const depSel = ev.target || document.getElementById('departmentSelect');
-    const deptId = depSel ? depSel.value : null;
-    if (!deptId) {
-      // clear selects to placeholder
-      document.querySelectorAll('.category').forEach(s => s.innerHTML = '<option value="">— Pilih Kategori —</option>');
-      return;
+        const baseWithIndex = base + '/index.php';
+
+        return baseWithIndex +
+            '/api/departments/' +
+            encodeURIComponent(deptId) +
+            '/categories';
     }
-    const cats = await fetchCategoriesForDepartment(deptId);
-    fillAllCategorySelects(cats);
-    // also ensure existing rows (in case some were added after initial fill)
-    document.querySelectorAll('#lines .line-row').forEach(row => fillCategoriesOnRow(row, cats));
-  }
 
-  // wire department select event
-  const depEl = document.getElementById('departmentSelect');
-  if (depEl) {
-    depEl.addEventListener('change', onDepartmentChange);
-  }
+    /**
+     * Ambil list kategori dari backend untuk departemen tertentu.
+     * Sudah:
+     *  - normalisasi base url (anti dobel index.php)
+     *  - kirim cookie/session (credentials: 'same-origin')
+     *  - cek content-type harus JSON
+     */
+    async function fetchCategoriesForDept(deptId) {
+        if (!deptId) return [];
 
-  // call once on load if a department already selected
-  document.addEventListener('DOMContentLoaded', async function() {
-    const dep = document.getElementById('departmentSelect');
-    if (dep && dep.value) {
-      // populate categories initially
-      await onDepartmentChange({ target: dep });
-    }
-    // ensure that when rows are dynamically added we populate categories for the new row:
-    // observe #lines for added nodes
-    const linesContainer = document.getElementById('lines');
-    if (linesContainer) {
-      const obs = new MutationObserver(async function(muts) {
-        // on add nodes, get current categories for selected dept and fill the new row(s)
-        const deptId = dep ? dep.value : null;
-        const cats = deptId ? await fetchCategoriesForDepartment(deptId) : [];
-        for (const m of muts) {
-          for (const n of m.addedNodes) {
-            if (n.nodeType === 1 && n.classList.contains('line-row')) {
-              fillCategoriesOnRow(n, cats);
-            }
-          }
+        const url = buildCategoriesUrl(deptId);
+        if (!url) {
+            console.warn('[categories] URL tidak dapat dibentuk, deptId kosong');
+            return [];
         }
-      });
-      obs.observe(linesContainer, { childList: true });
-    }
-  });
 
-  // If your addNewLineRow clones an existing row and resets dataset/wired flag,
-  // ensure it does NOT copy <select> options; our MutationObserver will fill it.
-  // If you want immediate fill from addNewLineRow, call fillCategoriesOnRow(newRow, currentCats).
+        console.debug('[categories] fetching url:', url);
+
+        try {
+            const res = await fetch(url, {
+                method: 'GET',
+                headers: { 'Accept': 'application/json' },
+                // penting: kirim cookie/session supaya Laravel mengenali user
+                credentials: 'same-origin' // pakai 'include' kalau lintas subdomain
+            });
+
+            const contentType = res.headers.get('content-type') || '';
+
+            if (!res.ok) {
+                const preview = await res.text();
+                console.warn(
+                    '[categories] HTTP error',
+                    res.status,
+                    res.statusText,
+                    'preview:',
+                    preview.substring(0, 300)
+                );
+                return [];
+            }
+
+            // Kalau backend balikin HTML (misalnya halaman login) jangan di-parse JSON
+            if (!contentType.includes('application/json')) {
+                const text = await res.text();
+                console.warn(
+                    '[categories] expected JSON, got',
+                    contentType,
+                    'status',
+                    res.status,
+                    'preview:',
+                    text.substring(0, 300)
+                );
+                return [];
+            }
+
+            const j = await res.json();
+            console.debug('[categories] response data', j);
+
+            return Array.isArray(j.data) ? j.data : [];
+        } catch (e) {
+            console.error('[categories] fetch error', e);
+            return [];
+        }
+    }
+
+    /**
+     * Build HTML <option> dari array kategori.
+     */
+    function buildOptionsHtml(categories) {
+        const parts = ['<option value="">— Pilih Kategori —</option>'];
+
+        categories.forEach(c => {
+            parts.push(
+                `<option value="${c.id}">${escapeHtml(c.name)}</option>`
+            );
+        });
+
+        return parts.join('\n');
+    }
+
+    /**
+     * Set isi semua <select.category> di halaman.
+     */
+    function setAllCategorySelects(optionsHtml) {
+        document.querySelectorAll('.category').forEach(sel => {
+            const prevVal = sel.value || '';
+            sel.innerHTML = optionsHtml;
+
+            if (prevVal !== '') {
+                try {
+                    sel.value = prevVal;
+                } catch (_) {
+                    // abaikan kalau value lama tidak ada di list baru
+                }
+            }
+        });
+    }
+
+    /**
+     * Set isi <select.category> untuk satu row (dipakai saat clone).
+     */
+    function setCategoryForRow(rowEl, optionsHtml) {
+        const sel = rowEl.querySelector('.category');
+        if (!sel) return;
+
+        const prevVal = sel.value || '';
+        sel.innerHTML = optionsHtml;
+
+        if (prevVal !== '') {
+            try {
+                sel.value = prevVal;
+            } catch (_) {
+                // abaikan
+            }
+        }
+    }
+
+    /**
+     * Helper global yang dipanggil dari create.blade.php
+     * ketika menambah baris baru (clone).
+     */
+    window.__deftrack_setCategoryOptionsForRow = function (rowEl) {
+        if (!rowEl) return;
+
+        if (currentCategoryOptions && currentCategoryOptions.trim() !== '') {
+            setCategoryForRow(rowEl, currentCategoryOptions);
+            return;
+        }
+
+        const depSel = document.getElementById('departmentSelect');
+        const deptId = depSel ? depSel.value : null;
+
+        if (!deptId) {
+            setCategoryForRow(rowEl, '<option value="">— Pilih Kategori —</option>');
+            return;
+        }
+
+        fetchCategoriesForDept(deptId).then(list => {
+            currentCategoryOptions = buildOptionsHtml(list);
+            setCategoryForRow(rowEl, currentCategoryOptions);
+        });
+    };
+
+    /**
+     * Handler ketika departemen berubah.
+     */
+    async function onDepartmentChange(e) {
+        const depSel = e && e.target
+            ? e.target
+            : document.getElementById('departmentSelect');
+
+        if (!depSel) {
+            console.warn('[categories] #departmentSelect not found');
+            return;
+        }
+
+        const deptId = depSel.value;
+        console.debug('[categories] department changed to', deptId);
+
+        // Kalau departemen kosong, reset opsi kategori
+        if (!deptId) {
+            currentDeptId = null;
+            currentCategoryOptions = '<option value="">— Pilih Kategori —</option>';
+            setAllCategorySelects(currentCategoryOptions);
+            return;
+        }
+
+        // Kalau sama dengan department sebelumnya, tidak usah refetch
+        if (currentDeptId && String(currentDeptId) === String(deptId)) {
+            console.debug('[categories] same dept, skip refetch');
+            return;
+        }
+
+        currentDeptId = deptId;
+
+        const cats = await fetchCategoriesForDept(deptId);
+        currentCategoryOptions = buildOptionsHtml(cats);
+        setAllCategorySelects(currentCategoryOptions);
+    }
+
+    /**
+     * Init saat DOM siap.
+     */
+    document.addEventListener('DOMContentLoaded', function () {
+        const depSel = document.getElementById('departmentSelect');
+
+        if (!depSel) {
+            console.warn('[categories] #departmentSelect not found on DOMContentLoaded');
+            return;
+        }
+
+        // Pasang listener perubahan departemen
+        depSel.addEventListener('change', onDepartmentChange);
+
+        // Kalau form sudah punya departemen (old input / edit),
+        // langsung load kategori awal
+        if (depSel.value) {
+            onDepartmentChange({ target: depSel });
+        }
+    });
 })();
 </script>

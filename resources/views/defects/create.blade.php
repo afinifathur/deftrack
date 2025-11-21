@@ -34,7 +34,8 @@
                     <select id="departmentSelect"
                             name="department_id"
                             class="form-select"
-                            required>
+                            required
+                            data-categories-url-template="{{ url('index.php/api/departments/:id/categories') }}">
                         <option value="">— Pilih Departemen —</option>
                         @foreach($departments as $dep)
                             <option value="{{ $dep->id }}"
@@ -145,12 +146,7 @@
 
                             <div class="col-md-3 mt-2">
                                 <label class="form-label">Kategori</label>
-                                {{-- 
-                                    Diisi DINAMIS lewat JS berdasarkan departemen:
-                                    - JS di _line_category_js akan mem-fetch
-                                      /api/departments/{department}/categories
-                                      dan mengisi semua <select.category>.
-                                --}}
+                                {{-- Diisi DINAMIS lewat JS berdasarkan departemen --}}
                                 <select class="form-select category"
                                         name="lines[{{ $i }}][defect_type_id]">
                                     <option value="">— Pilih Kategori —</option>
@@ -229,7 +225,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }
 
-    // helpers to find elements in a row (compatible with your blade)
+    // helpers to find elements in a row
     function findHeatEl(row) {
         return row.querySelector('.heat')
             || row.querySelector('input[name*="[heat"]')
@@ -489,6 +485,12 @@ document.addEventListener('DOMContentLoaded', function () {
 
             document.getElementById('lines').appendChild(clone);
             reindexAllRows();
+
+            // 🔑 penting: isi kategori di baris baru dari cache
+            if (window.__deftrack_setCategoryOptionsForRow) {
+                window.__deftrack_setCategoryOptionsForRow(clone);
+            }
+
             wireRow(clone);
         }
 
