@@ -432,4 +432,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
 }); // DOMContentLoaded
 </script>
+{{-- partial JS tambahan (tanpa <script> di dalamnya) --}}
+ @include('defects._line_category_js')
 @endpush

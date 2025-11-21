@@ -12,6 +12,7 @@ class DatabaseSeeder extends Seeder
             DepartmentSeeder::class,
             DefectTypeSeeder::class,
               UserSeeder::class,
+              CategorySeeder::class
         ]);
     }
 }

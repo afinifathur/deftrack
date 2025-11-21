@@ -12,8 +12,7 @@ use App\Http\Controllers\DefectController;
 use App\Http\Controllers\ApprovalController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\SettingsController;
-use App\Http\Controllers\ImportController;
-use App\Http\Controllers\Api\LookupController;
+use App\Http\Controllers\CategoryController;
 
 /*
 |--------------------------------------------------------------------------
@@ -37,30 +36,17 @@ Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
 
 /*
 |--------------------------------------------------------------------------
-| Dashboard (authenticated users)
+| Dashboard
 |--------------------------------------------------------------------------
 */
 Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
 
 /*
 |--------------------------------------------------------------------------
-| Routes that require authentication
+| Routes yang memerlukan autentikasi
 |--------------------------------------------------------------------------
 */
 Route::middleware('auth')->group(function () {
-
-    /*
-    |--------------------------------------------------------------------------
-    | API: autocomplete / lookup
-    |--------------------------------------------------------------------------
-    */
-    Route::prefix('api')->name('api.')->group(function () {
-        Route::get('/heat',            [LookupController::class, 'heats'])->name('heat');
-        Route::get('/item-info',       [LookupController::class, 'itemInfo'])->name('itemInfo');
-
-        // Next batch code (auth-only)
-        Route::get('/next-batch-code', [LookupController::class, 'nextBatchCode'])->name('nextBatchCode');
-    });
 
     /*
     |--------------------------------------------------------------------------
@@ -103,12 +89,12 @@ Route::middleware('auth')->group(function () {
             ->whereNumber('importSession');
 
         // Export per import session
-        Route::get('/{importSession}/export', [ImportController::class, 'export'])
+        Route::get('/{importSession}/export', [BatchImportController::class, 'export'])
             ->name('export')
             ->whereNumber('importSession');
 
         // Detail / edit / update / delete import session
-        Route::get('/{importSession}',      [BatchImportController::class, 'show'])
+        Route::get('/{importSession}', [BatchImportController::class, 'show'])
             ->name('show')
             ->whereNumber('importSession');
 
@@ -116,30 +102,27 @@ Route::middleware('auth')->group(function () {
             ->name('edit')
             ->whereNumber('importSession');
 
-        Route::put('/{importSession}',      [BatchImportController::class, 'update'])
+        Route::put('/{importSession}', [BatchImportController::class, 'update'])
             ->name('update')
             ->whereNumber('importSession');
 
-        Route::delete('/{importSession}',   [BatchImportController::class, 'destroy'])
+        Route::delete('/{importSession}', [BatchImportController::class, 'destroy'])
             ->name('destroy')
             ->whereNumber('importSession');
     });
 
     /*
     |--------------------------------------------------------------------------
-    | Defects (route order matters: static routes before dynamic)
+    | Defects
     |--------------------------------------------------------------------------
     */
-    // List (authenticated users)
     Route::get('/defects', [DefectController::class, 'index'])->name('defects.index');
 
-    // Create / store (Admin QC & Kabag QC)
     Route::middleware([RoleMiddleware::class . ':admin_qc,kabag_qc'])->group(function () {
         Route::get('/defects/create', [DefectController::class, 'create'])->name('defects.create');
         Route::post('/defects',       [DefectController::class, 'store'])->name('defects.store');
     });
 
-    // Recycle & restore (static) — placed before dynamic {defect}
     Route::middleware([RoleMiddleware::class . ':kabag_qc,direktur,mr'])->group(function () {
         Route::get('/defects/recycle',       [DefectController::class, 'recycle'])->name('defects.recycle');
         Route::post('/defects/{id}/restore', [DefectController::class, 'restore'])
@@ -147,12 +130,10 @@ Route::middleware('auth')->group(function () {
             ->whereNumber('id');
     });
 
-    // Show (public to authenticated users) — restrict param to numbers
     Route::get('/defects/{defect}', [DefectController::class, 'show'])
         ->name('defects.show')
         ->whereNumber('defect');
 
-    // Single-item actions (edit/update/destroy)
     Route::get('/defects/{defect}/edit', [DefectController::class, 'edit'])
         ->name('defects.edit')
         ->whereNumber('defect');
@@ -165,12 +146,17 @@ Route::middleware('auth')->group(function () {
         ->name('defects.destroy')
         ->whereNumber('defect');
 
-    // Submit / approvals (Kabag QC only)
-    Route::middleware([RoleMiddleware::class . ':kabag_qc'])->group(function () {
-        Route::post('/defects/{defect}/submit', [DefectController::class, 'submit'])
-            ->name('defects.submit')
-            ->whereNumber('defect');
+    /*
+    |--------------------------------------------------------------------------
+    | Submit & Approvals
+    |--------------------------------------------------------------------------
+    */
+    Route::post('/defects/{defect}/submit', [DefectController::class, 'submit'])
+        ->middleware(RoleMiddleware::class . ':admin_qc')
+        ->name('defects.submit')
+        ->whereNumber('defect');
 
+    Route::middleware([RoleMiddleware::class . ':kabag_qc'])->group(function () {
         Route::post('/approvals/{defect}/approve', [ApprovalController::class, 'approve'])
             ->name('approvals.approve')
             ->whereNumber('defect');
@@ -187,6 +173,7 @@ Route::middleware('auth')->group(function () {
 |--------------------------------------------------------------------------
 */
 Route::middleware(['auth', RoleMiddleware::class . ':kabag_qc,direktur,mr,admin'])->group(function () {
+
     Route::get('/settings', [SettingsController::class, 'index'])->name('settings.index');
 
     // Departments
@@ -194,11 +181,27 @@ Route::middleware(['auth', RoleMiddleware::class . ':kabag_qc,direktur,mr,admin'
         ->name('settings.departments.store');
 
     Route::patch('/settings/departments/{department}/toggle', [SettingsController::class, 'toggleDepartment'])
-        ->name('settings.departments.toggle');
+        ->name('settings.departments.toggle')
+        ->whereNumber('department');
 
     // Types
     Route::post('/settings/types', [SettingsController::class, 'storeType'])
         ->name('settings.types.store');
+
+    // Categories (web settings)
+    Route::get('/settings/categories', [CategoryController::class, 'index'])
+        ->name('settings.categories.index');
+
+    Route::post('/settings/categories', [CategoryController::class, 'store'])
+        ->name('settings.categories.store');
+
+    Route::patch('/settings/categories/{category}', [CategoryController::class, 'update'])
+        ->name('settings.categories.update')
+        ->whereNumber('category');
+
+    Route::delete('/settings/categories/{category}', [CategoryController::class, 'destroy'])
+        ->name('settings.categories.destroy')
+        ->whereNumber('category');
 });
 
 /*
