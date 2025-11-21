@@ -18,14 +18,25 @@ use App\Http\Controllers\Api\DepartmentController;
 |--------------------------------------------------------------------------
 */
 
-// Lookup / autocomplete
+/*
+|--------------------------------------------------------------------------
+| Lookup / Autocomplete Routes
+|--------------------------------------------------------------------------
+*/
 Route::get('heat', [LookupController::class, 'heats'])
     ->name('api.heat');
 
 Route::get('item-info', [LookupController::class, 'itemInfo'])
     ->name('api.itemInfo');
 
-// Departments -> Categories (dipakai dropdown kategori di defects)
+/*
+|--------------------------------------------------------------------------
+| Department → Category Routes
+|--------------------------------------------------------------------------
+| Digunakan untuk dropdown kategori pada modul defects.
+| Parameter {department} harus berupa angka.
+|--------------------------------------------------------------------------
+*/
 Route::get('departments/{department}/categories', [DepartmentController::class, 'categories'])
     ->name('api.departments.categories')
     ->whereNumber('department');

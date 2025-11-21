@@ -12,14 +12,21 @@ class DepartmentController extends Controller
     /**
      * Ambil kategori berdasarkan ID departemen.
      *
-     * GET /api/departments/{department}/categories
+     * Route: GET /api/departments/{department}/categories
+     *
+     * @param  int  $department  ID departemen
      */
-    public function categories(int $departmentId): JsonResponse
+    public function categories(int $department): JsonResponse
     {
         try {
-            // Jika pakai pivot category_department
-            $categories = Category::whereHas('departments', function ($query) use ($departmentId) {
-                    $query->where('departments.id', $departmentId);
+            // Jika tabel categories punya kolom department_id
+            // dan ingin menampilkan:
+            // - kategori khusus departemen tsb (department_id = $department)
+            // - kategori global (department_id = null)
+            $categories = Category::query()
+                ->where(function ($q) use ($department) {
+                    $q->where('department_id', $department)
+                      ->orWhereNull('department_id');
                 })
                 ->orderBy('name')
                 ->get(['id', 'name', 'tag']);
@@ -30,9 +37,9 @@ class DepartmentController extends Controller
             ]);
         } catch (\Throwable $e) {
             Log::error(
-                "API departments.categories error for department {$departmentId}: " . $e->getMessage(),
+                "API departments.categories error for department {$department}: {$e->getMessage()}",
                 [
-                    'department_id' => $departmentId,
+                    'department_id' => $department,
                     'trace'         => $e->getTraceAsString(),
                 ]
             );

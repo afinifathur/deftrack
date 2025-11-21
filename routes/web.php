@@ -3,7 +3,7 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Middleware\RoleMiddleware;
 
-// Controllers
+// Controllers (web)
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\BatchImportController;
@@ -13,6 +13,10 @@ use App\Http\Controllers\ApprovalController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\SettingsController;
 use App\Http\Controllers\CategoryController;
+
+// Controllers (API-like endpoint via web, pakai session)
+use App\Http\Controllers\Api\DepartmentController;
+use App\Http\Controllers\Api\LookupController;
 
 /*
 |--------------------------------------------------------------------------
@@ -47,6 +51,31 @@ Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard
 |--------------------------------------------------------------------------
 */
 Route::middleware('auth')->group(function () {
+
+    /*
+    |--------------------------------------------------------------------------
+    | AJAX / JSON (Lookup & Autocomplete) - pakai session auth
+    |--------------------------------------------------------------------------
+    | Dipakai JS untuk autocomplete / lookup pada form input.
+    | URL:
+    |   GET /api/heat
+    |   GET /api/item-info
+    |--------------------------------------------------------------------------
+    */
+    Route::get('/api/heat', [LookupController::class, 'heats'])->name('api.heat');
+    Route::get('/api/item-info', [LookupController::class, 'itemInfo'])->name('api.itemInfo');
+
+    /*
+    |--------------------------------------------------------------------------
+    | AJAX / JSON (Departments → Categories) - pakai session auth
+    |--------------------------------------------------------------------------
+    | Dipakai oleh JS untuk mengisi dropdown kategori berdasarkan departemen.
+    | URL: GET /api/departments/{department}/categories
+    |--------------------------------------------------------------------------
+    */
+    Route::get('/api/departments/{department}/categories', [DepartmentController::class, 'categories'])
+        ->name('api.departments.categories')
+        ->whereNumber('department');
 
     /*
     |--------------------------------------------------------------------------

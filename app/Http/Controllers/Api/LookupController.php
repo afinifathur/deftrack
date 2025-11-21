@@ -4,12 +4,11 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Batch;
-use App\Models\ImportSession;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Schema;
 
 class LookupController extends Controller
 {
@@ -20,11 +19,11 @@ class LookupController extends Controller
     public function heats(Request $request)
     {
         $prefix = (string) $request->query('prefix', '');
-        $limit = (int) $request->query('limit', 20);
+        $limit  = (int) $request->query('limit', 20);
 
         // sanitasi & batasan
         $prefix = trim($prefix);
-        $limit = max(1, min($limit, 50)); // min 1, max 50
+        $limit  = max(1, min($limit, 50)); // min 1, max 50
 
         if ($prefix === '') {
             return response()->json(['status' => 'ok', 'data' => []], 200);
@@ -57,13 +56,13 @@ class LookupController extends Controller
      */
     public function itemInfo(Request $request)
     {
-        $heat = (string) $request->query('heat', '');
+        $heat     = (string) $request->query('heat', '');
         $itemCode = (string) $request->query('item_code', '');
 
         if (trim($heat) === '' && trim($itemCode) === '') {
             return response()->json([
-                'status' => 'error',
-                'message' => 'Parameter "heat" atau "item_code" required.'
+                'status'  => 'error',
+                'message' => 'Parameter "heat" atau "item_code" required.',
             ], 422);
         }
 
@@ -89,16 +88,16 @@ class LookupController extends Controller
             'cast_date',
         ]);
 
-        if (!$batch) {
+        if (! $batch) {
             return response()->json([
                 'status' => 'ok',
-                'data' => null
+                'data'   => null,
             ], 200);
         }
 
         return response()->json([
             'status' => 'ok',
-            'data' => [
+            'data'   => [
                 'heat_number'   => $batch->heat_number,
                 'item_code'     => $batch->item_code,
                 'item_name'     => $batch->item_name,
@@ -109,140 +108,137 @@ class LookupController extends Controller
                 'size'          => $batch->size,
                 'line'          => $batch->line,
                 'cust_name'     => $batch->cust_name,
-                'cast_date'     => optional($batch->cast_date)->toString() ?? null,
-            ]
+                'cast_date'     => optional($batch->cast_date)->toDateString() ?? null,
+            ],
         ], 200);
     }
 
     /**
      * GET /api/next-batch-code?departemen=Cor%20Flange&date=2025-11-18
+     * GET /api/next-batch-code?department_id=1&date=2025-11-18
      *
-     * Accepts either:
-     *  - departemen (string name), or
-     *  - department_id (integer)
-     *
-     * Returns JSON:
-     * { status: 'ok', code: 'CR-20251118-01', prefix: 'CR-20251118', next: 1 }
+     * Menghasilkan kode batch dinamis per departemen dan tanggal.
+     * Contoh respons:
+     * {
+     *   "status": "ok",
+     *   "code": "CR-20251118-01",
+     *   "prefix": "CR-20251118",
+     *   "next": 1,
+     *   "department": {
+     *      "id": 1,
+     *      "name": "Cor Flange"
+     *   }
+     * }
      */
     public function nextBatchCode(Request $request)
     {
-        $departemen = $request->query('departemen', null);
-        $departmentId = $request->query('department_id', null);
-        $dateInput = (string) $request->query('date', Carbon::now()->toDateString());
+        $departemen   = $request->query('departemen');      // nama departemen (optional)
+        $departmentId = $request->query('department_id');   // id departemen (optional)
+        $dateInput    = (string) $request->query('date', Carbon::now()->toDateString());
 
-        // validate date
+        // Validasi tanggal
         try {
             $date = Carbon::parse($dateInput)->startOfDay();
         } catch (\Throwable $e) {
-            return response()->json(['status' => 'error', 'message' => 'Invalid date format. Use YYYY-MM-DD.'], 422);
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Invalid date format. Use YYYY-MM-DD.',
+            ], 422);
         }
 
-        // require either departemen or department_id
-        if (($departemen === null || trim((string)$departemen) === '') && ($departmentId === null || trim((string)$departmentId) === '')) {
-            return response()->json(['status' => 'error', 'message' => 'Parameter departemen (name) or department_id is required.'], 422);
+        // Wajib ada salah satu: department_id atau departemen (name)
+        if (
+            ($departmentId === null || trim((string) $departmentId) === '') &&
+            ($departemen === null || trim((string) $departemen) === '')
+        ) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Parameter departemen (name) atau department_id wajib diisi.',
+            ], 422);
         }
 
-        // mapping departemen -> code (extendable)
-        $map = [
-            'Cor Flange'         => 'CR',
-            'BUBUT'              => 'BT',
-            'BOR'                => 'BR',
-            'Netto Potong'       => 'NT',
-            'Gudang Jadi'        => 'GJ',
-        ];
+        /*
+         * 1. Resolve departemen dari tabel departments
+         *    - Kalau department_id ada → pakai itu
+         *    - Kalau tidak → cari berdasarkan nama (kolom `name`)
+         */
+        $departmentRow = null;
 
-        // determine prefixKey
-        $prefixKey = null;
         if ($departmentId !== null && is_numeric($departmentId)) {
-            // try to lookup department name from import_sessions or departments table
-            $name = DB::table('departments')->where('id', (int)$departmentId)->value('name');
-            if ($name) {
-                if (isset($map[$name])) {
-                    $prefixKey = $map[$name];
-                } else {
-                    $clean = preg_replace('/[^A-Za-z]/', '', $name);
-                    $prefixKey = strtoupper(Str::substr($clean, 0, 2)) ?: 'XX';
-                }
-            }
+            $departmentRow = DB::table('departments')
+                ->where('id', (int) $departmentId)
+                ->first();
+        } elseif ($departemen !== null && trim((string) $departemen) !== '') {
+            $departmentRow = DB::table('departments')
+                ->where('name', trim((string) $departemen))
+                ->first();
         }
 
-        if ($prefixKey === null && $departemen !== null) {
-            $depClean = trim((string)$departemen);
-            if (isset($map[$depClean])) {
-                $prefixKey = $map[$depClean];
-            } else {
-                $clean = preg_replace('/[^A-Za-z]/', '', $depClean);
-                $prefixKey = strtoupper(Str::substr($clean, 0, 2)) ?: 'XX';
-            }
+        if (! $departmentRow) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Department tidak ditemukan.',
+            ], 404);
         }
 
-        // Count existing batches for the same departemen/date
-        // Flexible where clause:
-        // - If import_sessions stores department_id, use that
-        // - If import_sessions stores departemen (name), use that
+        $departmentId   = (int) $departmentRow->id;
+        $departmentName = (string) ($departmentRow->name ?? '');
+
+        /*
+         * 2. Tentukan prefix kode:
+         *    - Jika tabel departments punya kolom `code` dan terisi → pakai itu (dinamis dari DB)
+         *    - Kalau tidak → generate dari nama (2 huruf pertama yang alphabet)
+         */
+        $prefixKey = null;
+
+        if (Schema::hasColumn('departments', 'code') && ! empty($departmentRow->code)) {
+            $prefixKey = strtoupper($departmentRow->code);
+        } else {
+            $cleanName = preg_replace('/[^A-Za-z]/', '', $departmentName);
+            $prefixKey = strtoupper(Str::substr($cleanName, 0, 2) ?: 'XX');
+        }
+
+        /*
+         * 3. Hitung jumlah batch existing untuk departemen & tanggal itu
+         *    - Diasumsikan:
+         *      * batches.import_session_id → import_sessions.id
+         *      * import_sessions.department_id (ideal)
+         *    - Kalau belum ada department_id di import_sessions:
+         *      * fallback ke kolom `departemen` (string name) jika ada.
+         */
         $dateStr = $date->toDateString();
 
         $query = DB::table('batches as b')
             ->join('import_sessions as s', 'b.import_session_id', '=', 's.id')
             ->whereDate('b.cast_date', $dateStr);
 
-        // try department_id first
-        if ($departmentId !== null && is_numeric($departmentId)) {
-            // if your import_sessions table has department_id column:
-            if (SchemaHasColumn('import_sessions', 'department_id')) {
-                $query->where('s.department_id', (int)$departmentId);
-            } else {
-                // fallback: try to match department name via departments table
-                $query->where('s.departemen', '=', (string)$departemen);
-            }
-        } else {
-            // use departemen name (assume import_sessions.departemen exists)
-            if (SchemaHasColumn('import_sessions', 'departemen')) {
-                $query->where('s.departemen', '=', (string)$departemen);
-            } else {
-                // fallback: try to resolve department name to id via departments table
-                $deptId = DB::table('departments')->where('name', (string)$departemen)->value('id');
-                if ($deptId) {
-                    if (SchemaHasColumn('import_sessions', 'department_id')) {
-                        $query->where('s.department_id', $deptId);
-                    } else {
-                        // no reliable column -> try matching by department name anyway
-                        $query->where('s.departemen', '=', (string)$departemen);
-                    }
-                } else {
-                    // nothing matched; count will be zero (safe fallback)
-                    $query->whereRaw('1 = 0');
-                }
-            }
+        if (Schema::hasColumn('import_sessions', 'department_id')) {
+            // Skema ideal: simpan department_id di import_sessions
+            $query->where('s.department_id', $departmentId);
+        } elseif (Schema::hasColumn('import_sessions', 'departemen')) {
+            // Fallback: simpan nama departemen di import_sessions
+            $query->where('s.departemen', $departmentName);
         }
 
         $count = (int) $query->count();
-        $next = $count + 1;
+        $next  = $count + 1;
 
-        $datePart = $date->format('Ymd');
-        $indexPart = str_pad($next, 2, '0', STR_PAD_LEFT);
-        $code = "{$prefixKey}-{$datePart}-{$indexPart}";
+        /*
+         * 4. Bentuk kode: PREFIX-YYYYMMDD-XX
+         */
+        $datePart  = $date->format('Ymd');
+        $indexPart = str_pad((string) $next, 2, '0', STR_PAD_LEFT);
+        $code      = "{$prefixKey}-{$datePart}-{$indexPart}";
 
         return response()->json([
-            'status' => 'ok',
-            'code'   => $code,
-            'prefix' => "{$prefixKey}-{$datePart}",
-            'next'   => $next,
+            'status'     => 'ok',
+            'code'       => $code,
+            'prefix'     => "{$prefixKey}-{$datePart}",
+            'next'       => $next,
+            'department' => [
+                'id'   => $departmentId,
+                'name' => $departmentName,
+            ],
         ], 200);
-    }
-}
-
-/**
- * Small helper to detect if a DB table has a column.
- * Keep it near controller for convenience (or move to helper/util).
- */
-if (! function_exists('SchemaHasColumn')) {
-    function SchemaHasColumn(string $table, string $column): bool
-    {
-        try {
-            return DB::getSchemaBuilder()->hasColumn($table, $column);
-        } catch (\Throwable $e) {
-            return false;
-        }
     }
 }
