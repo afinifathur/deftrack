@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class Department extends Model
 {
     /**
-     * Atribut yang boleh diisi mass-assignment.
+     * Atribut yang boleh diisi mass assignment.
      *
      * @var array<int, string>
      */
@@ -18,7 +18,7 @@ class Department extends Model
     ];
 
     /**
-     * Casting atribut.
+     * Casting atribut ke tipe tertentu.
      *
      * @var array<string, string>
      */
@@ -27,14 +27,21 @@ class Department extends Model
     ];
 
     /**
-     * Relasi ke kategori (many-to-many).
+     * Relasi many-to-many ke Category.
      *
-     * Tabel pivot: category_department
+     * Pivot: category_department
+     *  - department_id
+     *  - category_id
      *
      * @return \Illuminate\Database\Eloquent\Relations\BelongsToMany
      */
     public function categories()
     {
-        return $this->belongsToMany(Category::class, 'category_department');
+        return $this->belongsToMany(
+            Category::class,        // model terkait
+            'category_department',  // nama tabel pivot
+            'department_id',        // FK ke tabel departments
+            'category_id'           // FK ke tabel categories
+        );
     }
 }
